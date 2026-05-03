@@ -1,9 +1,9 @@
 [package]
 name = "reigen"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Population genomics toolkit — format conversion, DTC import, dataset merging (reimplementation of EIGENSOFT convertf + mergeit)."
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0"
 
 [[bin]]
 name = "reigen"

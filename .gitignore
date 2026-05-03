@@ -5,3 +5,4 @@
 # smoke test artifacts
 /tmp/smoke/
 *.md
+approach.txt

@@ -1,7 +1,7 @@
 # reigen
 
 [![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](#license)
 
 `reigen` is a high-performance population genomics toolkit for format conversion, DTC kit import, dataset merging, and summary statistics. Written in pure Rust, it provides a fast, memory-efficient alternative to legacy tools like AdmixTools `convertf` and `mergeit`, optimized for modern bioinformatics pipelines and large-scale datasets (e.g., AADR).
 
@@ -146,4 +146,4 @@ cargo test
 ```
 
 ## License
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
+Licensed under the [GNU General Public License v3.0](LICENSE).
