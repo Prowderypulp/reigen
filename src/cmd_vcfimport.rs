@@ -58,6 +58,10 @@ pub struct VcfImportArgs {
 pub fn run_vcfimport(args: VcfImportArgs) -> Result<()> {
     let t0 = Instant::now();
 
+    if args.numchrom > 251 {
+        bail!("numchrom {} is too large (max 251)", args.numchrom);
+    }
+
     let p_path = args.out_prefix.as_ref().map(PathBuf::from);
     let (geno_ext, snp_ext, ind_ext) = args.out_format.default_output_extensions();
     let out_geno = args

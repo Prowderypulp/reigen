@@ -336,12 +336,16 @@ fn parse_vcf_chrom(s: &str, numchrom: u32) -> u8 {
     if let Ok(c) = s.parse::<u8>() {
         return c;
     }
-    let nc = numchrom as u8;
+
+    let Ok(nc) = u8::try_from(numchrom) else {
+        return 0;
+    };
+
     match s.to_ascii_uppercase().as_str() {
-        "X" => nc + 1,
-        "Y" => nc + 2,
-        "M" | "MT" => nc + 3,
-        "XY" => nc + 4,
+        "X" => nc.checked_add(1).unwrap_or(0),
+        "Y" => nc.checked_add(2).unwrap_or(0),
+        "M" | "MT" => nc.checked_add(3).unwrap_or(0),
+        "XY" => nc.checked_add(4).unwrap_or(0),
         _ => 0, // unknown → skip
     }
 }

@@ -59,7 +59,7 @@ pub struct FilterArgs {
     pub badsnp: Option<PathBuf>,
 
     /// List of SNPs to keep
-    #[arg(long)]
+    #[arg(long, alias = "extract", alias = "snplist")]
     pub snps: Option<PathBuf>,
 
     /// Restrict to a chromosome or range (e.g. 1, 1-5, 1,3-5)
@@ -118,7 +118,7 @@ pub struct FilterArgs {
 
 pub fn run_filter(args: FilterArgs) -> Result<()> {
     let (geno_in, snp_in, ind_in) =
-        resolve_paths(args.in_prefix, args.geno, args.snp, args.ind, None, false)?;
+        pipeline::resolve_paths(args.in_prefix, args.geno, args.snp, args.ind, None, false)?;
 
     // Infer format if not provided
     let out_format = match args.out_format {
@@ -126,7 +126,7 @@ pub fn run_filter(args: FilterArgs) -> Result<()> {
         None => crate::format::infer_input_format(&geno_in)?,
     };
 
-    let (geno_out, snp_out, ind_out) = resolve_paths(
+    let (geno_out, snp_out, ind_out) = pipeline::resolve_paths(
         args.out_prefix,
         args.out_geno,
         args.out_snp,
@@ -166,70 +166,3 @@ pub fn run_filter(args: FilterArgs) -> Result<()> {
     pipeline::run_convert(&cfg)
 }
 
-fn resolve_paths(
-    prefix: Option<String>,
-    geno: Option<PathBuf>,
-    snp: Option<PathBuf>,
-    ind: Option<PathBuf>,
-    out_format: Option<Format>,
-    is_output: bool,
-) -> Result<(PathBuf, PathBuf, PathBuf)> {
-    if let Some(p) = prefix {
-        let p_path = PathBuf::from(p);
-        let g = geno.unwrap_or_else(|| {
-            if is_output {
-                let (gext, _, _) = out_format
-                    .expect("out_format required for output")
-                    .default_output_extensions();
-                return p_path.with_extension(gext);
-            }
-            // Check for .bed first, then .geno
-            let bed = p_path.with_extension("bed");
-            if bed.exists() {
-                bed
-            } else {
-                p_path.with_extension("geno")
-            }
-        });
-
-        let s = snp.unwrap_or_else(|| {
-            if is_output {
-                let (_, sext, _) = out_format
-                    .expect("out_format required for output")
-                    .default_output_extensions();
-                return p_path.with_extension(sext);
-            }
-            if g.extension().and_then(|e| e.to_str()) == Some("bed") {
-                p_path.with_extension("bim")
-            } else {
-                p_path.with_extension("snp")
-            }
-        });
-
-        let i = ind.unwrap_or_else(|| {
-            if is_output {
-                let (_, _, iext) = out_format
-                    .expect("out_format required for output")
-                    .default_output_extensions();
-                return p_path.with_extension(iext);
-            }
-            if g.extension().and_then(|e| e.to_str()) == Some("bed") {
-                p_path.with_extension("fam")
-            } else {
-                p_path.with_extension("ind")
-            }
-        });
-
-        Ok((g, s, i))
-    } else {
-        let g = geno.ok_or_else(|| {
-            anyhow::anyhow!("missing genotype input (provide --geno or --in-prefix)")
-        })?;
-        let s =
-            snp.ok_or_else(|| anyhow::anyhow!("missing SNP input (provide --snp or --in-prefix)"))?;
-        let i = ind.ok_or_else(|| {
-            anyhow::anyhow!("missing individual input (provide --ind or --in-prefix)")
-        })?;
-        Ok((g, s, i))
-    }
-}

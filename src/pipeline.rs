@@ -467,7 +467,7 @@ fn compute_snp_stats(
     Ok(stats)
 }
 
-fn read_input_snp(path: &Path, fmt: Format, numchrom: u32) -> Result<Vec<SnpRow>> {
+pub fn read_input_snp(path: &Path, fmt: Format, numchrom: u32) -> Result<Vec<SnpRow>> {
     match fmt {
         Format::Eigenstrat | Format::PackedAncestrymap | Format::Ancestrymap | Format::Tgeno => {
             meta::snp::read(path, numchrom)
@@ -477,7 +477,7 @@ fn read_input_snp(path: &Path, fmt: Format, numchrom: u32) -> Result<Vec<SnpRow>
     }
 }
 
-fn read_input_ind(path: &Path, fmt: Format, familynames: bool) -> Result<Vec<IndRow>> {
+pub fn read_input_ind(path: &Path, fmt: Format, familynames: bool) -> Result<Vec<IndRow>> {
     match fmt {
         Format::Eigenstrat | Format::PackedAncestrymap | Format::Ancestrymap | Format::Tgeno => {
             meta::ind::read(path)
@@ -487,7 +487,7 @@ fn read_input_ind(path: &Path, fmt: Format, familynames: bool) -> Result<Vec<Ind
     }
 }
 
-fn write_output_snp(path: &Path, fmt: Format, rows: &[SnpRow], numchrom: u32) -> Result<()> {
+pub fn write_output_snp(path: &Path, fmt: Format, rows: &[SnpRow], numchrom: u32) -> Result<()> {
     match fmt {
         Format::Eigenstrat | Format::PackedAncestrymap | Format::Ancestrymap | Format::Tgeno => {
             meta::snp::write(path, rows, numchrom)
@@ -497,7 +497,7 @@ fn write_output_snp(path: &Path, fmt: Format, rows: &[SnpRow], numchrom: u32) ->
     }
 }
 
-fn write_output_ind(path: &Path, fmt: Format, rows: &[IndRow], outputgroup: bool) -> Result<()> {
+pub fn write_output_ind(path: &Path, fmt: Format, rows: &[IndRow], outputgroup: bool) -> Result<()> {
     match fmt {
         Format::Eigenstrat | Format::PackedAncestrymap | Format::Ancestrymap | Format::Tgeno => {
             meta::ind::write(path, rows)
@@ -521,6 +521,11 @@ pub fn open_reader_pub(
     nsnp: usize,
 ) -> Result<Box<dyn GenoReader>> {
     open_reader(fmt, path, nind, nsnp)
+}
+
+/// Public writer dispatch.
+pub fn open_writer_pub(fmt: Format, path: &Path) -> Result<Box<dyn GenoWriter>> {
+    open_writer(fmt, path)
 }
 
 fn open_reader(fmt: Format, path: &Path, nind: usize, nsnp: usize) -> Result<Box<dyn GenoReader>> {
@@ -916,5 +921,73 @@ mod tests {
             compute_missing_counts(&mut r, &keep_snps, &keep_inds, 2, 3).unwrap();
         assert_eq!(snp_miss, vec![1, 2, 0]);
         assert_eq!(ind_miss, vec![1, 2]);
+    }
+}
+
+pub fn resolve_paths(
+    prefix: Option<String>,
+    geno: Option<PathBuf>,
+    snp: Option<PathBuf>,
+    ind: Option<PathBuf>,
+    out_format: Option<Format>,
+    is_output: bool,
+) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    if let Some(p) = prefix {
+        let p_path = PathBuf::from(p);
+        let g = geno.unwrap_or_else(|| {
+            if is_output {
+                let (gext, _, _) = out_format
+                    .expect("out_format required for output")
+                    .default_output_extensions();
+                return p_path.with_extension(gext);
+            }
+            // Check for .bed first, then .geno
+            let bed = p_path.with_extension("bed");
+            if bed.exists() {
+                bed
+            } else {
+                p_path.with_extension("geno")
+            }
+        });
+
+        let s = snp.unwrap_or_else(|| {
+            if is_output {
+                let (_, sext, _) = out_format
+                    .expect("out_format required for output")
+                    .default_output_extensions();
+                return p_path.with_extension(sext);
+            }
+            if g.extension().and_then(|e| e.to_str()) == Some("bed") {
+                p_path.with_extension("bim")
+            } else {
+                p_path.with_extension("snp")
+            }
+        });
+
+        let i = ind.unwrap_or_else(|| {
+            if is_output {
+                let (_, _, iext) = out_format
+                    .expect("out_format required for output")
+                    .default_output_extensions();
+                return p_path.with_extension(iext);
+            }
+            if g.extension().and_then(|e| e.to_str()) == Some("bed") {
+                p_path.with_extension("fam")
+            } else {
+                p_path.with_extension("ind")
+            }
+        });
+
+        Ok((g, s, i))
+    } else {
+        let g = geno.ok_or_else(|| {
+            anyhow::anyhow!("missing genotype input (provide --in-geno or --in-prefix)")
+        })?;
+        let s =
+            snp.ok_or_else(|| anyhow::anyhow!("missing SNP input (provide --in-snp or --in-prefix)"))?;
+        let i = ind.ok_or_else(|| {
+            anyhow::anyhow!("missing individual input (provide --in-ind or --in-prefix)")
+        })?;
+        Ok((g, s, i))
     }
 }

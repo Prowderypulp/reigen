@@ -7,9 +7,10 @@ pub mod ibs;
 pub mod per_sample;
 pub mod per_snp;
 
-use crate::format::{self, Format};
+use crate::format::{self};
 use crate::geno::codec;
-use crate::meta::{self, IndRow, SnpRow};
+use crate::meta::{IndRow, SnpRow};
+use crate::pipeline;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use std::path::PathBuf;
@@ -71,12 +72,8 @@ pub fn run_stats(args: StatsArgs) -> Result<()> {
     let t0 = Instant::now();
 
     // Resolve input paths
-    let (geno_in, snp_in, ind_in) = resolve_input_paths(
-        args.in_prefix.as_deref(),
-        args.geno.as_deref(),
-        args.snp.as_deref(),
-        args.ind.as_deref(),
-    )?;
+    let (geno_in, snp_in, ind_in) =
+        pipeline::resolve_paths(args.in_prefix, args.geno, args.snp, args.ind, None, false)?;
 
     let in_fmt = format::infer_input_format(&geno_in).context("inferring input format")?;
     log::info!("input format: {in_fmt:?}");
@@ -84,8 +81,8 @@ pub fn run_stats(args: StatsArgs) -> Result<()> {
     let numchrom = args.numchrom;
 
     // Load metadata
-    let snp_rows = read_snp(&snp_in, in_fmt, numchrom)?;
-    let ind_rows = read_ind(&ind_in, in_fmt, !args.no_familynames)?;
+    let snp_rows = pipeline::read_input_snp(&snp_in, in_fmt, numchrom)?;
+    let ind_rows = pipeline::read_input_ind(&ind_in, in_fmt, !args.no_familynames)?;
     log::info!(
         "metadata: {} SNPs, {} samples",
         snp_rows.len(),
@@ -149,12 +146,12 @@ pub fn run_stats(args: StatsArgs) -> Result<()> {
     let out_snps: Vec<SnpRow> = snp_rows
         .iter()
         .zip(keep_snps.iter())
-        .filter_map(|(s, &k)| if k { Some(s.clone()) } else { None })
+        .filter_map(|(s, &k): (&SnpRow, &bool)| if k { Some(s.clone()) } else { None })
         .collect();
     let out_inds: Vec<IndRow> = ind_rows
         .iter()
         .zip(keep_inds.iter())
-        .filter_map(|(i, &k)| if k { Some(i.clone()) } else { None })
+        .filter_map(|(i, &k): (&IndRow, &bool)| if k { Some(i.clone()) } else { None })
         .collect();
 
     // Initialize accumulators
@@ -344,68 +341,3 @@ pub fn run_stats(args: StatsArgs) -> Result<()> {
     Ok(())
 }
 
-fn resolve_input_paths(
-    prefix: Option<&str>,
-    geno: Option<&std::path::Path>,
-    snp: Option<&std::path::Path>,
-    ind: Option<&std::path::Path>,
-) -> Result<(PathBuf, PathBuf, PathBuf)> {
-    if let Some(p) = prefix {
-        let p_path = PathBuf::from(p);
-        let bed = p_path.with_extension("bed");
-        let is_bed = bed.exists();
-        let g = geno.map(PathBuf::from).unwrap_or_else(|| {
-            if is_bed {
-                bed.clone()
-            } else {
-                p_path.with_extension("geno")
-            }
-        });
-        let s = snp.map(PathBuf::from).unwrap_or_else(|| {
-            if is_bed {
-                p_path.with_extension("bim")
-            } else {
-                p_path.with_extension("snp")
-            }
-        });
-        let i = ind.map(PathBuf::from).unwrap_or_else(|| {
-            if is_bed {
-                p_path.with_extension("fam")
-            } else {
-                p_path.with_extension("ind")
-            }
-        });
-        Ok((g, s, i))
-    } else {
-        let g = geno
-            .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("missing --geno or --in-prefix"))?;
-        let s = snp
-            .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("missing --snp or --in-prefix"))?;
-        let i = ind
-            .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("missing --ind or --in-prefix"))?;
-        Ok((g, s, i))
-    }
-}
-
-fn read_snp(path: &std::path::Path, fmt: Format, numchrom: u32) -> Result<Vec<SnpRow>> {
-    match fmt {
-        Format::Eigenstrat | Format::PackedAncestrymap | Format::Ancestrymap | Format::Tgeno => {
-            meta::snp::read(path, numchrom)
-        }
-        Format::PackedPed => meta::bim::read(path, numchrom),
-        Format::Ped => bail!("PED text format not supported"),
-    }
-}
-
-fn read_ind(path: &std::path::Path, fmt: Format, familynames: bool) -> Result<Vec<IndRow>> {
-    match fmt {
-        Format::Eigenstrat | Format::PackedAncestrymap | Format::Ancestrymap | Format::Tgeno => {
-            meta::ind::read(path)
-        }
-        Format::PackedPed => meta::fam::read(path, familynames),
-        Format::Ped => bail!("PED text format not supported"),
-    }
-}
