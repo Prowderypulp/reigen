@@ -10,7 +10,7 @@
 
 use crate::geno::codec;
 use crate::meta::{IndRow, SnpRow};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -101,16 +101,19 @@ pub fn write_vcf(
 }
 
 fn chrom_to_vcf_string(chrom: u8, numchrom: u32, prefix: &str) -> String {
-    let nc = numchrom as u8;
+    let Some(nc) = normalized_numchrom(numchrom) else {
+        return format!("{}{}", prefix, chrom);
+    };
+
     if chrom >= 1 && chrom <= nc {
         format!("{}{}", prefix, chrom)
-    } else if chrom == nc + 1 {
+    } else if Some(chrom) == nc.checked_add(1) {
         format!("{}X", prefix)
-    } else if chrom == nc + 2 {
+    } else if Some(chrom) == nc.checked_add(2) {
         format!("{}Y", prefix)
-    } else if chrom == nc + 3 {
+    } else if Some(chrom) == nc.checked_add(3) {
         format!("{}MT", prefix)
-    } else if chrom == nc + 4 {
+    } else if Some(chrom) == nc.checked_add(4) {
         format!("{}XY", prefix)
     } else {
         format!("{}{}", prefix, chrom)
@@ -156,6 +159,10 @@ pub fn read_vcf(
     ref_filter: Option<&std::collections::HashMap<(u8, u64), usize>>,
     snplist: Option<&HashSet<String>>,
 ) -> Result<(Vec<String>, Vec<VcfRecord>, VcfReadStats)> {
+    if normalized_numchrom(numchrom).is_none() {
+        bail!("numchrom {} is too large (max 251)", numchrom);
+    }
+
     let file = std::fs::File::open(path).with_context(|| format!("open VCF {}", path.display()))?;
     let reader = BufReader::new(file);
 
@@ -337,7 +344,7 @@ fn parse_vcf_chrom(s: &str, numchrom: u32) -> u8 {
         return c;
     }
 
-    let Ok(nc) = u8::try_from(numchrom) else {
+    let Some(nc) = normalized_numchrom(numchrom) else {
         return 0;
     };
 
@@ -348,6 +355,12 @@ fn parse_vcf_chrom(s: &str, numchrom: u32) -> u8 {
         "XY" => nc.checked_add(4).unwrap_or(0),
         _ => 0, // unknown → skip
     }
+}
+
+fn normalized_numchrom(numchrom: u32) -> Option<u8> {
+    let nc = u8::try_from(numchrom).ok()?;
+    nc.checked_add(4)?;
+    Some(nc)
 }
 
 #[cfg(test)]
@@ -381,6 +394,11 @@ mod tests {
         assert_eq!(parse_vcf_chrom("chrM", 22), 25);
         assert_eq!(parse_vcf_chrom("XY", 22), 26);
         assert_eq!(parse_vcf_chrom("UNKNOWN", 22), 0);
+    }
+
+    #[test]
+    fn parse_vcf_chrom_rejects_large_numchrom() {
+        assert_eq!(parse_vcf_chrom("X", 252), 0);
     }
 
     #[test]

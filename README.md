@@ -3,61 +3,72 @@
 [![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](#license)
 
-`reigen` is a high-performance population genomics toolkit for format conversion, DTC kit import, dataset merging, and summary statistics. Written in pure Rust, it provides a fast, memory-efficient alternative to legacy tools like AdmixTools `convertf` and `mergeit`, optimized for modern bioinformatics pipelines and large-scale datasets (e.g., AADR).
+`reigen` is a pure-Rust population genomics toolkit for format conversion, DTC kit import, dataset merge/reconciliation, filtering, statistics, and VCF interoperability.
 
 ## Key Features
 
-- **High-Performance**: Pure Rust implementation with streaming I/O and parallel matrix transpose.
-- **AADR-Scale**: Optimized for datasets with millions of SNPs and thousands of samples.
-- **Memory Efficient**: Processes data record-by-record with a minimal memory footprint.
-- **Pure Rust**: No external dependencies on legacy C libraries or AdmixTools.
-- **Strand-Aware Merging**: Automatic allele alignment and strand reconciliation when merging datasets.
-- **Format Sniffing**: Automatically detects input formats (PAM, EIGENSTRAT, TGENO, BED) from file magic and extensions.
+- **CLI toolkit**: `convert`, `import`, `merge`, `filter`, `stats`, `export`, `vcfimport`
+- **Format sniffing**: Detects PAM/EIGENSTRAT/TGENO/BED from magic + extensions
+- **Cross-format conversion**: AdmixTools and PLINK families with shared filters
+- **Strand-aware merge**: Allele reconciliation during multi-dataset merge
+- **VCF support**: VCF export plus biallelic SNP VCF import
+- **Streaming-first core**: Same-layout operations stream efficiently; some sample-major workflows materialize matrices
 
 ---
 
 ## Quick Start
 
-### 1. Convert Formats
+### 1. Convert formats
 ```bash
 reigen convert \
-    --in-prefix input_data \
+    -i input_data \
     --out-format PACKEDANCESTRYMAP \
-    --out-prefix converted_data
+    -o converted_data
 ```
 
-### 2. Import DTC Kit (23andMe, Ancestry, etc.)
+### 2. Filter a dataset
 ```bash
-reigen import \
-    --in raw_kit.txt \
-    --sample-id my_sample \
-    --out-prefix my_kit
+reigen filter \
+    -i input_data \
+    -o filtered_data \
+    --chrom 1-5 \
+    --maf 0.01 \
+    --keep keep_samples.txt
 ```
 
-### 3. Merge Datasets
+### 3. Compute stats
 ```bash
-reigen merge \
-    --in dataset1 \
-    --in dataset2 \
-    --out-prefix merged_output
+reigen stats -i input_data -o qc --ibs
 ```
 
-### 4. Compute Statistics
+### 4. Export to VCF
 ```bash
-reigen stats -i input_prefix -o stats_report
+reigen export -i input_data -o output.vcf --chr-prefix
 ```
 
----
+### 5. Import from VCF
+```bash
+reigen vcfimport \
+    --in input.vcf \
+    --out-format PACKEDPED \
+    -o vcf_as_bed
+```
 
-## Installation
+## Important CLI notes
+
+- `convert`/`filter` input file flags are `--in-geno`, `--in-snp`, `--in-ind` (or `-i/--in-prefix`)
+- `filter --out-format` is optional; when omitted it defaults to inferred input format
+- missingness aliases:
+  - per-SNP: `--max-miss-snp` (alias `--geno`)
+  - per-sample: `--mind`
+- SNP keep-list aliases on `convert`/`filter`: `--snps`, `--extract`, `--snplist`
+- `stats` toggles are negative flags: `--no-per-snp`, `--no-per-sample`
+- `vcfimport` only supports biallelic SNP records and enforces `--numchrom <= 251`
+
+## Installation (from source)
 
 ```bash
-# Clone and build
-git clone https://github.com/youruser/reigen.git
-cd reigen
 cargo build --release
-
-# Run
 ./target/release/reigen --help
 ```
 
