@@ -107,9 +107,15 @@ reigen merge --in ds1 --in ds2 --out-format PACKEDPED -o merged
 
 Useful switches:
 - `--intersection` (otherwise union semantics)
+- `--in-list <file>` (one dataset prefix or `geno:snp:ind` triple per line)
 - `--flip-strand`
+- `--no-flip-reference` (disallow A1/A2 swap-based genotype flips)
 - `--allow-ambiguous`
 - `--strict-ids`
+
+Outputs:
+- `<out>.missnp.tsv` and `<out>.missnp` for dropped SNPs
+- `<out>.idmap.tsv` when duplicate sample IDs are auto-renamed
 
 ---
 

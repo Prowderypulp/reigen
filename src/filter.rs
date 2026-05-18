@@ -32,8 +32,8 @@ pub fn load_bad_snps(path: &Path) -> Result<AHashSet<String>> {
 
 /// Load `snps` keep list into a hashset of SNP IDs.
 pub fn load_snp_keep(path: &Path) -> Result<AHashSet<String>> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read snps {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("read snps {}", path.display()))?;
     Ok(text.split_ascii_whitespace().map(str::to_owned).collect())
 }
 
@@ -66,8 +66,8 @@ fn parse_sample_line(line: &str) -> Option<SampleKey> {
 }
 
 fn load_sample_list(path: &Path, name: &str) -> Result<AHashSet<SampleKey>> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read {name} {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("read {name} {}", path.display()))?;
     Ok(text.lines().filter_map(parse_sample_line).collect())
 }
 
@@ -291,7 +291,11 @@ mod tests {
 
     #[test]
     fn ignore_drops() {
-        let f = IndFilter { pop_keep: None, sample_keep: None, sample_remove: None };
+        let f = IndFilter {
+            pop_keep: None,
+            sample_keep: None,
+            sample_remove: None,
+        };
         assert!(!f.keep(&i("S1", "Pop", true)));
         assert!(f.keep(&i("S1", "Pop", false)));
     }

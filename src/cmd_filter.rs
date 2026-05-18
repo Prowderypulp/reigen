@@ -165,4 +165,3 @@ pub fn run_filter(args: FilterArgs) -> Result<()> {
 
     pipeline::run_convert(&cfg)
 }
-

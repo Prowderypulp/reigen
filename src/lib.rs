@@ -1,6 +1,6 @@
-pub mod cmd_filter;
 pub mod cmd_convert;
 pub mod cmd_export;
+pub mod cmd_filter;
 pub mod cmd_vcfimport;
 pub mod filter;
 pub mod format;

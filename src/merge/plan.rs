@@ -8,13 +8,21 @@
 //! in every dataset are dropped.
 
 use crate::format::{self, Format};
-use crate::merge::key::{reconcile, FlipDecision, SnpKey};
+use crate::merge::key::{reconcile, FlipDecision, ReconcileError, ReconcileOpts, SnpKey};
 use crate::meta::{IndRow, SnpRow};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+pub struct MergeInputSpec {
+    pub label: String,
+    pub geno: PathBuf,
+    pub snp: PathBuf,
+    pub ind: PathBuf,
+}
+
 pub struct DatasetMetadata {
+    pub label: String,
     pub format: Format,
     pub geno: PathBuf,
     pub snps: Vec<SnpRow>,
@@ -42,6 +50,7 @@ pub struct MergePlan {
     pub snp_plans: Vec<SnpPlan>,
     pub output_inds: Vec<IndRow>,
     pub dropped_snps: Vec<MissnpRecord>,
+    pub renamed_samples: Vec<RenamedSample>,
 }
 
 pub struct MissnpRecord {
@@ -52,21 +61,30 @@ pub struct MissnpRecord {
     pub ref_a2: u8,
     pub src_a1: Option<u8>,
     pub src_a2: Option<u8>,
+    pub dataset_label: String,
     pub reason: &'static str,
 }
 
+pub struct RenamedSample {
+    pub dataset_label: String,
+    pub original_id: String,
+    pub renamed_id: String,
+}
+
 pub fn build_plan(
-    inputs: Vec<(PathBuf, PathBuf, PathBuf)>,
-    allow_ambiguous: bool,
+    inputs: Vec<MergeInputSpec>,
+    reconcile_opts: ReconcileOpts,
     intersection: bool,
-    flipstrand: bool,
     numchrom: u32,
     familynames: bool,
     strict_ids: bool,
 ) -> Result<MergePlan> {
     // --- 1. Load metadata for every dataset and build per-dataset index. ---
     let mut datasets = Vec::with_capacity(inputs.len());
-    for (geno, snp, ind) in inputs {
+    for input in inputs {
+        let geno = input.geno;
+        let snp = input.snp;
+        let ind = input.ind;
         let format = format::infer_input_format(&geno)?;
         let snps = if snp.extension().and_then(|e| e.to_str()) == Some("bim") {
             crate::meta::bim::read(&snp, numchrom)?
@@ -89,6 +107,7 @@ pub fn build_plan(
             );
         }
         datasets.push(DatasetMetadata {
+            label: input.label,
             format,
             geno,
             snps,
@@ -150,17 +169,10 @@ pub fn build_plan(
             match ds.index.get(&key) {
                 Some(&local_idx) => {
                     let s = &ds.snps[local_idx];
-                    match reconcile(
-                        s.allele1,
-                        s.allele2,
-                        ri.a1,
-                        ri.a2,
-                        flipstrand,
-                        allow_ambiguous,
-                    ) {
-                        Some(d) => decisions.push(Some((local_idx, d))),
-                        None => {
-                            if crate::strand::is_ambiguous(ri.a1, ri.a2) && !allow_ambiguous {
+                    match reconcile(s.allele1, s.allele2, ri.a1, ri.a2, reconcile_opts) {
+                        Ok(d) => decisions.push(Some((local_idx, d))),
+                        Err(e) => {
+                            if e == ReconcileError::Ambiguous {
                                 ambiguous = true;
                                 dropped_snps.push(MissnpRecord {
                                     rsid: ri.rep_id.clone(),
@@ -170,7 +182,21 @@ pub fn build_plan(
                                     ref_a2: ri.a2,
                                     src_a1: Some(s.allele1),
                                     src_a2: Some(s.allele2),
+                                    dataset_label: ds.label.clone(),
                                     reason: "ambiguous_at_cg",
+                                });
+                            } else if e == ReconcileError::InvalidAllele {
+                                unresolvable = true;
+                                dropped_snps.push(MissnpRecord {
+                                    rsid: ri.rep_id.clone(),
+                                    chrom: key.chrom,
+                                    pos: key.pos,
+                                    ref_a1: ri.a1,
+                                    ref_a2: ri.a2,
+                                    src_a1: Some(s.allele1),
+                                    src_a2: Some(s.allele2),
+                                    dataset_label: ds.label.clone(),
+                                    reason: "invalid_allele_code",
                                 });
                             } else {
                                 unresolvable = true;
@@ -182,6 +208,7 @@ pub fn build_plan(
                                     ref_a2: ri.a2,
                                     src_a1: Some(s.allele1),
                                     src_a2: Some(s.allele2),
+                                    dataset_label: ds.label.clone(),
                                     reason: "unresolvable_alleles",
                                 });
                             }
@@ -200,6 +227,7 @@ pub fn build_plan(
                             ref_a2: ri.a2,
                             src_a1: None,
                             src_a2: None,
+                            dataset_label: ds.label.clone(),
                             reason: "missing_in_dataset",
                         });
                         break;
@@ -246,23 +274,28 @@ pub fn build_plan(
     );
 
     // --- 4. Concatenate samples, with duplicate-ID handling. ---
-    let output_inds = concat_inds(&datasets, strict_ids)?;
+    let (output_inds, renamed_samples) = concat_inds(&datasets, strict_ids)?;
 
     Ok(MergePlan {
         datasets,
         snp_plans,
         output_inds,
         dropped_snps,
+        renamed_samples,
     })
 }
 
-fn concat_inds(datasets: &[DatasetMetadata], strict_ids: bool) -> Result<Vec<IndRow>> {
+fn concat_inds(
+    datasets: &[DatasetMetadata],
+    strict_ids: bool,
+) -> Result<(Vec<IndRow>, Vec<RenamedSample>)> {
     let total: usize = datasets.iter().map(|d| d.inds.len()).sum();
     let mut out = Vec::with_capacity(total);
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut collisions = 0usize;
+    let mut renames = Vec::new();
 
-    for (ds_idx, ds) in datasets.iter().enumerate() {
+    for ds in datasets {
         for ind in &ds.inds {
             if seen.contains_key(&ind.id) {
                 if strict_ids {
@@ -272,7 +305,7 @@ fn concat_inds(datasets: &[DatasetMetadata], strict_ids: bool) -> Result<Vec<Ind
                     );
                 }
                 collisions += 1;
-                let renamed = unique_renamed_id(&ind.id, ds_idx, &seen);
+                let renamed = unique_renamed_id(&ind.id, &ds.label, &seen);
                 log::warn!(
                     "duplicate sample id {:?} → renamed to {:?}",
                     ind.id,
@@ -281,6 +314,11 @@ fn concat_inds(datasets: &[DatasetMetadata], strict_ids: bool) -> Result<Vec<Ind
                 let mut clone = ind.clone();
                 clone.id = renamed.clone();
                 seen.insert(renamed, out.len());
+                renames.push(RenamedSample {
+                    dataset_label: ds.label.clone(),
+                    original_id: ind.id.clone(),
+                    renamed_id: clone.id.clone(),
+                });
                 out.push(clone);
             } else {
                 seen.insert(ind.id.clone(), out.len());
@@ -291,17 +329,33 @@ fn concat_inds(datasets: &[DatasetMetadata], strict_ids: bool) -> Result<Vec<Ind
     if collisions > 0 {
         log::warn!("{} sample id collision(s) auto-renamed", collisions);
     }
-    Ok(out)
+    Ok((out, renames))
 }
 
-fn unique_renamed_id(base_id: &str, ds_idx: usize, seen: &HashMap<String, usize>) -> String {
-    let mut candidate = format!("{base_id}.d{ds_idx}");
+fn unique_renamed_id(base_id: &str, dataset_label: &str, seen: &HashMap<String, usize>) -> String {
+    let mut candidate = format!("{base_id}.{}", sanitize_label(dataset_label));
     let mut k = 1usize;
     while seen.contains_key(&candidate) {
-        candidate = format!("{base_id}.d{ds_idx}.{k}");
+        candidate = format!("{base_id}.{}.{}", sanitize_label(dataset_label), k);
         k += 1;
     }
     candidate
+}
+
+fn sanitize_label(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    for c in label.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "dataset".to_string()
+    } else {
+        out
+    }
 }
 
 #[cfg(test)]
@@ -312,9 +366,9 @@ mod tests {
     #[test]
     fn renaming_avoids_secondary_collisions() {
         let mut seen = HashMap::new();
-        seen.insert("id.d1".to_string(), 0usize);
-        seen.insert("id.d1.1".to_string(), 1usize);
-        let id = unique_renamed_id("id", 1, &seen);
-        assert_eq!(id, "id.d1.2");
+        seen.insert("id.ds-2".to_string(), 0usize);
+        seen.insert("id.ds-2.1".to_string(), 1usize);
+        let id = unique_renamed_id("id", "ds-2", &seen);
+        assert_eq!(id, "id.ds-2.2");
     }
 }

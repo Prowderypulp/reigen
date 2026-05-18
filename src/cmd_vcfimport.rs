@@ -111,8 +111,12 @@ pub fn run_vcfimport(args: VcfImportArgs) -> Result<()> {
 
     // Read VCF
     log::info!("reading VCF from {}...", args.input.display());
-    let (sample_names, records, stats) =
-        vcf::read_vcf(&args.input, args.numchrom, ref_filter.as_ref(), snplist_ids.as_ref())?;
+    let (sample_names, records, stats) = vcf::read_vcf(
+        &args.input,
+        args.numchrom,
+        ref_filter.as_ref(),
+        snplist_ids.as_ref(),
+    )?;
 
     log::info!("VCF read stats:");
     log::info!("  Total records:           {}", stats.total_records);

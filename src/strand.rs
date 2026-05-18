@@ -42,6 +42,11 @@ pub fn is_ambiguous(a1: u8, a2: u8) -> bool {
     )
 }
 
+#[inline]
+pub fn is_acgt_allele(a: u8) -> bool {
+    matches!(a.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T')
+}
+
 /// Decide whether genotypes need 0↔2 flip given input and reference alleles.
 ///
 /// Returns:

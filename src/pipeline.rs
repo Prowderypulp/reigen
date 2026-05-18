@@ -26,7 +26,10 @@
 //! finish writer, write output metadata
 //! ```
 
-use crate::filter::{load_bad_snps, load_pop_keep, load_sample_keep, load_sample_remove, load_snp_keep, ChromFilter, IndFilter, SnpFilter};
+use crate::filter::{
+    load_bad_snps, load_pop_keep, load_sample_keep, load_sample_remove, load_snp_keep, ChromFilter,
+    IndFilter, SnpFilter,
+};
 use crate::format::{self, Format};
 use crate::geno::{codec, GenoReader, GenoWriter, Layout};
 use crate::geno::{eigenstrat, packed_am, packed_ped, tgeno};
@@ -123,7 +126,12 @@ pub fn run_convert(cfg: &ConvertConfig) -> Result<()> {
     let mut kept_snp_count = keep_snps.iter().filter(|&&k| k).count();
     let mut kept_ind_count = keep_inds.iter().filter(|&&k| k).count();
 
-    if cfg.max_miss_snp.is_some() || cfg.max_miss_ind.is_some() || cfg.maf.is_some() || cfg.max_maf.is_some() || cfg.hwe.is_some() {
+    if cfg.max_miss_snp.is_some()
+        || cfg.max_miss_ind.is_some()
+        || cfg.maf.is_some()
+        || cfg.max_maf.is_some()
+        || cfg.hwe.is_some()
+    {
         apply_stat_filters(
             cfg,
             in_fmt,
@@ -328,7 +336,7 @@ fn apply_stat_filters(
             total_inds,
             total_snps,
         )?;
-        
+
         let min_maf = cfg.maf.unwrap_or(0.0);
         let max_maf = cfg.max_maf.unwrap_or(1.0);
         let hwe_thresh = cfg.hwe.unwrap_or(0.0);
@@ -337,7 +345,7 @@ fn apply_stat_filters(
             if *keep {
                 let st = &stats[j];
                 let maf = st.maf();
-                
+
                 if maf.is_nan() {
                     // All samples missing for this SNP. Drop if any MAF filter is active.
                     if cfg.maf.is_some() || cfg.max_maf.is_some() {
@@ -497,7 +505,12 @@ pub fn write_output_snp(path: &Path, fmt: Format, rows: &[SnpRow], numchrom: u32
     }
 }
 
-pub fn write_output_ind(path: &Path, fmt: Format, rows: &[IndRow], outputgroup: bool) -> Result<()> {
+pub fn write_output_ind(
+    path: &Path,
+    fmt: Format,
+    rows: &[IndRow],
+    outputgroup: bool,
+) -> Result<()> {
     match fmt {
         Format::Eigenstrat | Format::PackedAncestrymap | Format::Ancestrymap | Format::Tgeno => {
             meta::ind::write(path, rows)
@@ -983,8 +996,9 @@ pub fn resolve_paths(
         let g = geno.ok_or_else(|| {
             anyhow::anyhow!("missing genotype input (provide --in-geno or --in-prefix)")
         })?;
-        let s =
-            snp.ok_or_else(|| anyhow::anyhow!("missing SNP input (provide --in-snp or --in-prefix)"))?;
+        let s = snp.ok_or_else(|| {
+            anyhow::anyhow!("missing SNP input (provide --in-snp or --in-prefix)")
+        })?;
         let i = ind.ok_or_else(|| {
             anyhow::anyhow!("missing individual input (provide --in-ind or --in-prefix)")
         })?;

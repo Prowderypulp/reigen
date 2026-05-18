@@ -64,6 +64,7 @@ reigen vcfimport \
 - SNP keep-list aliases on `convert`/`filter`: `--snps`, `--extract`, `--snplist`
 - `stats` toggles are negative flags: `--no-per-snp`, `--no-per-sample`
 - `vcfimport` only supports biallelic SNP records and enforces `--numchrom <= 251`
+- `merge` accepts repeated `--in` and `--in-list <file>` input specs; it writes `.missnp*` drop reports and `.idmap.tsv` when IDs are auto-renamed
 
 ## Installation (from source)
 

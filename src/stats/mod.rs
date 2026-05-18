@@ -340,4 +340,3 @@ pub fn run_stats(args: StatsArgs) -> Result<()> {
     log::info!("stats done in {:.2?}", t0.elapsed());
     Ok(())
 }
-

@@ -1,5 +1,5 @@
 use crate::format::Format;
-use crate::geno::{codec};
+use crate::geno::codec;
 use crate::meta::{IndRow, Sex, SnpRow};
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
@@ -126,9 +126,7 @@ pub fn run_import(args: ImportArgs) -> Result<()> {
         input: args.input,
         snps: args.snps,
         sample_id: args.sample_id.clone(),
-        sample_pop: args
-            .sample_pop
-            .unwrap_or_else(|| args.sample_id.clone()),
+        sample_pop: args.sample_pop.unwrap_or_else(|| args.sample_id.clone()),
         sample_sex: match args.sample_sex {
             SexArg::M => Sex::Male,
             SexArg::F => Sex::Female,
@@ -198,9 +196,7 @@ pub fn run_import(args: ImportArgs) -> Result<()> {
 
             let a = call.a1.to_ascii_uppercase() as u8;
             let b = call.a2.to_ascii_uppercase() as u8;
-            if !matches!(a, b'A' | b'C' | b'G' | b'T')
-                || !matches!(b, b'A' | b'C' | b'G' | b'T')
-            {
+            if !matches!(a, b'A' | b'C' | b'G' | b'T') || !matches!(b, b'A' | b'C' | b'G' | b'T') {
                 stats.dropped_nocall += 1;
                 continue;
             }
@@ -232,9 +228,15 @@ pub fn run_import(args: ImportArgs) -> Result<()> {
     log::info!("  Kept:                     {}", stats.matched);
     log::info!("  Dropped (no-call):        {}", stats.dropped_nocall);
     if snp_keep.is_some() {
-        log::info!("  Dropped (not in SNPs list): {}", stats.dropped_not_in_snps);
+        log::info!(
+            "  Dropped (not in SNPs list): {}",
+            stats.dropped_not_in_snps
+        );
     }
-    log::info!("  Dropped (non-autosomal):  {}", stats.dropped_non_autosomal);
+    log::info!(
+        "  Dropped (non-autosomal):  {}",
+        stats.dropped_non_autosomal
+    );
     log::info!("  Dropped (bad chrom):      {}", stats.dropped_bad_chrom);
 
     if stats.matched == 0 {

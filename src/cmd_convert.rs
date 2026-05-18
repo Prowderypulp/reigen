@@ -158,4 +158,3 @@ pub fn run(args: ConvertArgs) -> Result<()> {
 
     pipeline::run_convert(&cfg)
 }
-

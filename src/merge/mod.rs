@@ -22,11 +22,11 @@ use anyhow::Result;
 use clap::Args;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 
-use self::key::FlipDecision;
-use self::plan::build_plan;
+use self::key::{FlipDecision, ReconcileOpts};
+use self::plan::{build_plan, MergeInputSpec};
 use self::stream::open_seekable;
 
 #[derive(Args, Debug)]
@@ -34,6 +34,11 @@ pub struct MergeArgs {
     /// Input dataset, as geno:snp:ind or as a path prefix. Repeat per dataset.
     #[arg(long = "in", value_name = "PREFIX_OR_TRIPLE")]
     pub inputs: Vec<String>,
+
+    /// Text file with one PREFIX or geno:snp:ind spec per line.
+    /// Blank lines and lines starting with '#' are ignored.
+    #[arg(long = "in-list", value_name = "FILE")]
+    pub in_list: Option<PathBuf>,
 
     /// Output format
     #[arg(long)]
@@ -67,6 +72,10 @@ pub struct MergeArgs {
     #[arg(long)]
     pub flip_strand: bool,
 
+    /// Disable A1/A2 swap-based genotype flipping during reconciliation.
+    #[arg(long)]
+    pub no_flip_reference: bool,
+
     /// Error on duplicate sample IDs instead of auto-renaming id → id.dN.
     #[arg(long)]
     pub strict_ids: bool,
@@ -82,10 +91,18 @@ pub struct MergeArgs {
     /// Disable writing .missnp and .missnp.tsv reports for dropped SNPs.
     #[arg(long)]
     pub no_missnp: bool,
+
+    /// Disable writing .idmap.tsv report for duplicate sample ID renaming.
+    #[arg(long)]
+    pub no_idmap: bool,
 }
 
 pub fn run_merge(args: MergeArgs) -> Result<()> {
-    if args.inputs.len() < 2 {
+    let mut input_specs = args.inputs.clone();
+    if let Some(path) = args.in_list.as_ref() {
+        input_specs.extend(read_input_list(path)?);
+    }
+    if input_specs.len() < 2 {
         anyhow::bail!("merge requires at least two --in datasets");
     }
 
@@ -104,15 +121,18 @@ pub fn run_merge(args: MergeArgs) -> Result<()> {
         .or_else(|| p_path.as_ref().map(|p| p.with_extension(ind_ext)))
         .ok_or_else(|| anyhow::anyhow!("missing --out-ind or --out-prefix"))?;
 
-    let parsed_inputs: Vec<(PathBuf, PathBuf, PathBuf)> = args
-        .inputs
+    let parsed_inputs: Vec<ParsedInputSpec> = input_specs
         .iter()
-        .map(|s| parse_input_spec(s))
+        .enumerate()
+        .map(|(idx, s)| parse_input_spec(s, idx))
         .collect::<Result<_>>()?;
 
     let mut converted_tempdirs = Vec::new();
     let mut merge_inputs = Vec::with_capacity(parsed_inputs.len());
-    for (idx, (geno, snp, ind)) in parsed_inputs.into_iter().enumerate() {
+    for (idx, parsed) in parsed_inputs.into_iter().enumerate() {
+        let geno = parsed.geno;
+        let snp = parsed.snp;
+        let ind = parsed.ind;
         let in_fmt = crate::format::infer_input_format(&geno)?;
         if matches!(in_fmt, Format::Eigenstrat | Format::Tgeno) {
             let td = tempfile::Builder::new()
@@ -151,10 +171,20 @@ pub fn run_merge(args: MergeArgs) -> Result<()> {
                 cfg.geno_in
             );
             pipeline::run_convert(&cfg)?;
-            merge_inputs.push((cfg.geno_out, cfg.snp_out, cfg.ind_out));
+            merge_inputs.push(MergeInputSpec {
+                label: parsed.label,
+                geno: cfg.geno_out,
+                snp: cfg.snp_out,
+                ind: cfg.ind_out,
+            });
             converted_tempdirs.push(td);
         } else {
-            merge_inputs.push((geno, snp, ind));
+            merge_inputs.push(MergeInputSpec {
+                label: parsed.label,
+                geno,
+                snp,
+                ind,
+            });
         }
     }
 
@@ -164,9 +194,12 @@ pub fn run_merge(args: MergeArgs) -> Result<()> {
     );
     let plan = build_plan(
         merge_inputs,
-        args.allow_ambiguous,
+        ReconcileOpts {
+            flip_strand: args.flip_strand,
+            allow_ambiguous: args.allow_ambiguous,
+            allow_flip_reference: !args.no_flip_reference,
+        },
         args.intersection,
-        args.flip_strand,
         args.numchrom,
         !args.no_familynames,
         args.strict_ids,
@@ -185,6 +218,15 @@ pub fn run_merge(args: MergeArgs) -> Result<()> {
             "dropped SNP report: {} record(s) written to {}",
             plan.dropped_snps.len(),
             missnp_tsv.display()
+        );
+    }
+    if !args.no_idmap && !plan.renamed_samples.is_empty() {
+        let idmap = out_geno.with_extension("idmap.tsv");
+        write_idmap_report(&plan.renamed_samples, &idmap)?;
+        log::info!(
+            "sample id rename report: {} record(s) written to {}",
+            plan.renamed_samples.len(),
+            idmap.display()
         );
     }
 
@@ -327,15 +369,26 @@ pub fn run_merge(args: MergeArgs) -> Result<()> {
     Ok(())
 }
 
+struct ParsedInputSpec {
+    label: String,
+    geno: PathBuf,
+    snp: PathBuf,
+    ind: PathBuf,
+}
+
 /// Accept either `geno:snp:ind` (explicit triple) or a path prefix.
-fn parse_input_spec(s: &str) -> Result<(PathBuf, PathBuf, PathBuf)> {
+fn parse_input_spec(s: &str, idx: usize) -> Result<ParsedInputSpec> {
     let parts: Vec<&str> = s.split(':').collect();
     match parts.len() {
-        3 => Ok((
-            PathBuf::from(parts[0]),
-            PathBuf::from(parts[1]),
-            PathBuf::from(parts[2]),
-        )),
+        3 => {
+            let geno = PathBuf::from(parts[0]);
+            Ok(ParsedInputSpec {
+                label: dataset_label_from_path(&geno, idx),
+                geno,
+                snp: PathBuf::from(parts[1]),
+                ind: PathBuf::from(parts[2]),
+            })
+        }
         1 => {
             let p = PathBuf::from(parts[0]);
             let bed = p.with_extension("bed");
@@ -344,13 +397,41 @@ fn parse_input_spec(s: &str) -> Result<(PathBuf, PathBuf, PathBuf)> {
             } else {
                 (p.with_extension("geno"), "snp", "ind")
             };
-            Ok((g, p.with_extension(s_ext), p.with_extension(i_ext)))
+            Ok(ParsedInputSpec {
+                label: dataset_label_from_path(&p, idx),
+                geno: g,
+                snp: p.with_extension(s_ext),
+                ind: p.with_extension(i_ext),
+            })
         }
         _ => anyhow::bail!(
             "invalid --in spec {:?} (expected PREFIX or geno:snp:ind)",
             s
         ),
     }
+}
+
+fn dataset_label_from_path(path: &Path, idx: usize) -> String {
+    path.file_stem()
+        .or_else(|| path.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("dataset{}", idx + 1))
+}
+
+fn read_input_list(path: &Path) -> Result<Vec<String>> {
+    let f = File::open(path)?;
+    let r = BufReader::new(f);
+    let mut out = Vec::new();
+    for line in r.lines() {
+        let raw = line?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        out.push(trimmed.to_string());
+    }
+    Ok(out)
 }
 
 fn write_missnp_reports(
@@ -361,7 +442,7 @@ fn write_missnp_reports(
     let mut tsv = File::create(tsv_path)?;
     writeln!(
         tsv,
-        "rsid\tchrom\tpos\tref_a1\tref_a2\tsrc_a1\tsrc_a2\treason"
+        "rsid\tchrom\tpos\tref_a1\tref_a2\tsrc_a1\tsrc_a2\tdataset\treason"
     )?;
     for rec in dropped {
         let src_a1 = rec
@@ -374,7 +455,7 @@ fn write_missnp_reports(
             .unwrap_or_default();
         writeln!(
             tsv,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             rec.rsid,
             rec.chrom,
             rec.pos,
@@ -382,6 +463,7 @@ fn write_missnp_reports(
             rec.ref_a2 as char,
             src_a1,
             src_a2,
+            rec.dataset_label,
             rec.reason
         )?;
     }
@@ -396,9 +478,22 @@ fn write_missnp_reports(
     Ok(())
 }
 
+fn write_idmap_report(renamed: &[plan::RenamedSample], path: &Path) -> Result<()> {
+    let mut f = File::create(path)?;
+    writeln!(f, "dataset\toriginal_id\trenamed_id")?;
+    for rec in renamed {
+        writeln!(
+            f,
+            "{}\t{}\t{}",
+            rec.dataset_label, rec.original_id, rec.renamed_id
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::write_missnp_reports;
+    use super::{parse_input_spec, read_input_list, write_missnp_reports};
     use crate::merge::plan::MissnpRecord;
 
     #[test]
@@ -415,6 +510,7 @@ mod tests {
                 ref_a2: b'G',
                 src_a1: Some(b'C'),
                 src_a2: Some(b'T'),
+                dataset_label: "ds1".into(),
                 reason: "unresolvable_alleles",
             },
             MissnpRecord {
@@ -425,6 +521,7 @@ mod tests {
                 ref_a2: b'G',
                 src_a1: None,
                 src_a2: None,
+                dataset_label: "ds2".into(),
                 reason: "missing_in_dataset",
             },
         ];
@@ -434,5 +531,21 @@ mod tests {
         assert!(tsv_text.contains("unresolvable_alleles"));
         assert_eq!(missnp_text.lines().count(), 1);
         assert_eq!(missnp_text.trim(), "rs1");
+    }
+
+    #[test]
+    fn parse_input_prefix_spec() {
+        let parsed = parse_input_spec("cohort/a", 0).unwrap();
+        assert!(parsed.geno.ends_with("cohort/a.geno"));
+        assert_eq!(parsed.label, "a");
+    }
+
+    #[test]
+    fn reads_input_list_file() {
+        let d = tempfile::tempdir().unwrap();
+        let list = d.path().join("merge_inputs.txt");
+        std::fs::write(&list, "# c1\ncohort/a\n\ncohort/b\n").unwrap();
+        let lines = read_input_list(&list).unwrap();
+        assert_eq!(lines, vec!["cohort/a".to_string(), "cohort/b".to_string()]);
     }
 }
