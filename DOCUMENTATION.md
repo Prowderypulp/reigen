@@ -105,16 +105,23 @@ Merge 2+ datasets with allele reconciliation.
 reigen merge --in ds1 --in ds2 --out-format PACKEDPED -o merged
 ```
 
+Strand/allele reconciliation follows PLINK's multiallelic merge workflow
+automatically: for each shared SNP it tries a same-strand match, then an A1/A2
+swap, then a strand-flip (complement); SNPs that still don't reconcile are
+genuine 3+-allele sites and are dropped to the `.missnp` report (reason
+`multiallelic`). The plan log reports how many SNPs were strand-flipped.
+
 Useful switches:
 - `--intersection` (otherwise union semantics)
 - `--in-list <file>` (one dataset prefix or `geno:snp:ind` triple per line)
-- `--flip-strand`
+- `--no-flip-strand` (disable automatic strand-flip; drop complement-only matches for a strict same-strand merge)
+- `--flip-strand` (no-op; strand-flip reconciliation is now on by default — kept for back-compat)
 - `--no-flip-reference` (disallow A1/A2 swap-based genotype flips)
-- `--allow-ambiguous`
+- `--allow-ambiguous` (keep A/T and C/G SNPs, which are otherwise dropped before any flip)
 - `--strict-ids`
 
 Outputs:
-- `<out>.missnp.tsv` and `<out>.missnp` for dropped SNPs
+- `<out>.missnp.tsv` and `<out>.missnp` for dropped SNPs (reasons: `multiallelic`, `ambiguous_at_cg`, `invalid_allele_code`, `allele_swap_disallowed`, `allele_mismatch_no_flip`, `missing_in_dataset`)
 - `<out>.idmap.tsv` when duplicate sample IDs are auto-renamed
 
 ---

@@ -68,9 +68,17 @@ pub struct MergeArgs {
     #[arg(long)]
     pub intersection: bool,
 
-    /// Accept complement matches when reconciling alleles across datasets.
+    /// Accept complement (strand-flip) matches when reconciling alleles.
+    /// On by default (PLINK-style flip-then-drop); retained for back-compat
+    /// and as a no-op since strand reconciliation is now automatic.
     #[arg(long)]
     pub flip_strand: bool,
+
+    /// Disable automatic strand-flip reconciliation. With this set, SNPs whose
+    /// alleles only match after a complement (e.g. A/C vs T/G) are dropped
+    /// instead of flipped — a strict same-strand merge.
+    #[arg(long)]
+    pub no_flip_strand: bool,
 
     /// Disable A1/A2 swap-based genotype flipping during reconciliation.
     #[arg(long)]
@@ -195,7 +203,12 @@ pub fn run_merge(args: MergeArgs) -> Result<()> {
     let plan = build_plan(
         merge_inputs,
         ReconcileOpts {
-            flip_strand: args.flip_strand,
+            // Strand-flip reconciliation is automatic (PLINK-style: try plain,
+            // then complement, then drop). --no-flip-strand opts out for a
+            // strict same-strand merge. --flip-strand is kept as a no-op for
+            // back-compat. Ambiguous A/T & C/G SNPs are still dropped first
+            // (in reconcile()) unless --allow-ambiguous.
+            flip_strand: !args.no_flip_strand,
             allow_ambiguous: args.allow_ambiguous,
             allow_flip_reference: !args.no_flip_reference,
         },

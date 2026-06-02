@@ -101,4 +101,31 @@ mod tests {
             Ok(FlipDecision::Flip)
         );
     }
+
+    // PLINK-style flip-then-drop: with strand flip on (the default), a
+    // complement match (A/C vs T/G) reconciles, but a genuine 3+-allele site
+    // (A/C vs A/G) is unresolvable and must be dropped — flipping can't fix it.
+    #[test]
+    fn strand_flip_resolves_complement_but_not_triallelic() {
+        let opts = ReconcileOpts {
+            flip_strand: true,
+            allow_ambiguous: false,
+            allow_flip_reference: true,
+        };
+        // T/G is the opposite-strand reading of A/C → reconciles, no genotype flip.
+        assert_eq!(
+            reconcile(b'T', b'G', b'A', b'C', opts),
+            Ok(FlipDecision::Match)
+        );
+        // G/T is opposite strand + swapped order → reconciles with genotype flip.
+        assert_eq!(
+            reconcile(b'G', b'T', b'A', b'C', opts),
+            Ok(FlipDecision::Flip)
+        );
+        // A/G vs A/C: alleles {A,C,G} — complement of A/G is T/C, still != A/C.
+        assert_eq!(
+            reconcile(b'A', b'G', b'A', b'C', opts),
+            Err(ReconcileError::Unresolvable)
+        );
+    }
 }

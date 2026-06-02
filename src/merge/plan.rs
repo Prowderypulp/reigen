@@ -157,6 +157,8 @@ pub fn build_plan(
     let mut dropped_ambiguous = 0usize;
     let mut dropped_unresolvable = 0usize;
     let mut dropped_missing_for_intersection = 0usize;
+    // SNPs that only reconciled after a strand complement (PLINK's --flip step).
+    let mut strand_flipped = 0usize;
 
     for key in key_order {
         let ri = &ref_info[seen[&key]];
@@ -170,7 +172,16 @@ pub fn build_plan(
                 Some(&local_idx) => {
                     let s = &ds.snps[local_idx];
                     match reconcile(s.allele1, s.allele2, ri.a1, ri.a2, reconcile_opts) {
-                        Ok(d) => decisions.push(Some((local_idx, d))),
+                        Ok(d) => {
+                            // If it would NOT have reconciled on the same strand,
+                            // the match required a complement → count the flip.
+                            if crate::strand::decide_flip(s.allele1, s.allele2, ri.a1, ri.a2, false)
+                                .is_none()
+                            {
+                                strand_flipped += 1;
+                            }
+                            decisions.push(Some((local_idx, d)));
+                        }
                         Err(e) => {
                             if e == ReconcileError::Ambiguous {
                                 ambiguous = true;
@@ -200,6 +211,30 @@ pub fn build_plan(
                                 });
                             } else {
                                 unresolvable = true;
+                                // Classify why it didn't reconcile:
+                                // - a flip (swap or complement) WOULD have aligned
+                                //   the alleles but a policy flag disallowed it
+                                //   (e.g. --no-flip-reference) → swap_disallowed.
+                                // - with strand flipping on (default) and no flip
+                                //   possible → genuine 3+-allele site (PLINK's
+                                //   "remove if it still doesn't work after flip").
+                                // - with --no-flip-strand, an off-strand match is
+                                //   indistinguishable from triallelic → mismatch.
+                                let reason = if crate::strand::decide_flip(
+                                    s.allele1,
+                                    s.allele2,
+                                    ri.a1,
+                                    ri.a2,
+                                    reconcile_opts.flip_strand,
+                                )
+                                .is_some()
+                                {
+                                    "allele_swap_disallowed"
+                                } else if reconcile_opts.flip_strand {
+                                    "multiallelic"
+                                } else {
+                                    "allele_mismatch_no_flip"
+                                };
                                 dropped_snps.push(MissnpRecord {
                                     rsid: ri.rep_id.clone(),
                                     chrom: key.chrom,
@@ -209,7 +244,7 @@ pub fn build_plan(
                                     src_a1: Some(s.allele1),
                                     src_a2: Some(s.allele2),
                                     dataset_label: ds.label.clone(),
-                                    reason: "unresolvable_alleles",
+                                    reason,
                                 });
                             }
                             break;
@@ -261,8 +296,9 @@ pub fn build_plan(
     }
 
     log::info!(
-        "merge plan: {} SNPs retained ({} ambiguous, {} unresolvable, {} missing for {})",
+        "merge plan: {} SNPs retained ({} strand-flipped, {} ambiguous, {} multiallelic/unresolvable, {} missing for {})",
         snp_plans.len(),
+        strand_flipped,
         dropped_ambiguous,
         dropped_unresolvable,
         dropped_missing_for_intersection,

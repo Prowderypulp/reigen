@@ -280,30 +280,15 @@ fn apply_stat_filters(
     total_inds: usize,
     total_snps: usize,
 ) -> Result<()> {
-    // First phase: apply per-SNP missingness (geno) on current sample keep-mask.
-    if let Some(max_miss_snp) = cfg.max_miss_snp {
-        let mut reader = open_reader(in_fmt, &cfg.geno_in, total_inds, total_snps)?;
-        let (snp_missing, _) = compute_missing_counts(
-            reader.as_mut(),
-            keep_snps,
-            keep_inds,
-            total_inds,
-            total_snps,
-        )?;
-        let denom = keep_inds.iter().filter(|&&k| k).count() as f64;
-        if denom > 0.0 {
-            for (j, keep) in keep_snps.iter_mut().enumerate() {
-                if *keep {
-                    let miss_frac = (snp_missing[j] as f64) / denom;
-                    if miss_frac > max_miss_snp {
-                        *keep = false;
-                    }
-                }
-            }
-        }
-    }
+    // PLINK applies --mind (per-sample missingness) BEFORE --geno (per-SNP
+    // missingness): mind is computed over the full variant set, then geno over
+    // the surviving samples. We match that order so combined --geno/--mind
+    // results agree with PLINK. Doing geno first would compute mind only over
+    // the already-cleaned (low-missingness) SNPs, silently weakening --mind to
+    // a near no-op when paired with --geno (B-012).
 
-    // Second phase: apply per-sample missingness (mind) on the SNP mask after geno.
+    // First phase: per-sample missingness (mind) over the current SNP mask
+    // (all SNPs passing the structural snp_filter, before any geno drop).
     if let Some(max_miss_ind) = cfg.max_miss_ind {
         let mut reader = open_reader(in_fmt, &cfg.geno_in, total_inds, total_snps)?;
         let (_, ind_missing) = compute_missing_counts(
@@ -319,6 +304,29 @@ fn apply_stat_filters(
                 if *keep {
                     let miss_frac = (ind_missing[i] as f64) / denom;
                     if miss_frac > max_miss_ind {
+                        *keep = false;
+                    }
+                }
+            }
+        }
+    }
+
+    // Second phase: per-SNP missingness (geno) over the post-mind sample mask.
+    if let Some(max_miss_snp) = cfg.max_miss_snp {
+        let mut reader = open_reader(in_fmt, &cfg.geno_in, total_inds, total_snps)?;
+        let (snp_missing, _) = compute_missing_counts(
+            reader.as_mut(),
+            keep_snps,
+            keep_inds,
+            total_inds,
+            total_snps,
+        )?;
+        let denom = keep_inds.iter().filter(|&&k| k).count() as f64;
+        if denom > 0.0 {
+            for (j, keep) in keep_snps.iter_mut().enumerate() {
+                if *keep {
+                    let miss_frac = (snp_missing[j] as f64) / denom;
+                    if miss_frac > max_miss_snp {
                         *keep = false;
                     }
                 }
@@ -850,7 +858,8 @@ fn stream_cross_layout(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_missing_counts, validate_missingness_threshold};
+    use super::{compute_missing_counts, run_convert, validate_missingness_threshold, ConvertConfig};
+    use crate::format::Format;
     use crate::geno::{codec, GenoReader, Layout};
     use anyhow::Result;
 
@@ -934,6 +943,65 @@ mod tests {
             compute_missing_counts(&mut r, &keep_snps, &keep_inds, 2, 3).unwrap();
         assert_eq!(snp_miss, vec![1, 2, 0]);
         assert_eq!(ind_miss, vec![1, 2]);
+    }
+
+    // B-012: --mind must be applied BEFORE --geno (PLINK order). Construct a
+    // case where the two orders disagree: sample S1's missingness is entirely
+    // on the high-missingness SNPs that --geno would remove.
+    //   geno-first (wrong): drop rs2/rs3, then S1 looks fully called → 2 SNP, 2 ind
+    //   mind-first (right): S1 is 2/4 missing → dropped, then all 4 SNPs survive
+    //                       over the remaining sample → 4 SNP, 1 ind
+    #[test]
+    fn mind_applied_before_geno_like_plink() {
+        let dir = tempfile::tempdir().unwrap();
+        let geno_in = dir.path().join("in.geno");
+        let snp_in = dir.path().join("in.snp");
+        let ind_in = dir.path().join("in.ind");
+        // EIGENSTRAT: SNP-major, one line per SNP, one char per sample (0/1/2/9).
+        std::fs::write(&geno_in, "00\n00\n09\n09\n").unwrap();
+        std::fs::write(
+            &snp_in,
+            "rs0 1 0.0 1 A C\nrs1 1 0.0 2 A C\nrs2 1 0.0 3 A C\nrs3 1 0.0 4 A C\n",
+        )
+        .unwrap();
+        std::fs::write(&ind_in, "S0 U Pop\nS1 U Pop\n").unwrap();
+
+        let geno_out = dir.path().join("out.geno");
+        let snp_out = dir.path().join("out.snp");
+        let ind_out = dir.path().join("out.ind");
+        let cfg = ConvertConfig {
+            geno_in,
+            snp_in,
+            ind_in,
+            out_fmt: Format::Eigenstrat,
+            geno_out,
+            snp_out: snp_out.clone(),
+            ind_out: ind_out.clone(),
+            badsnp: None,
+            snps: None,
+            poplist: None,
+            keep: None,
+            remove: None,
+            chrom: None,
+            lopos: None,
+            hipos: None,
+            noxdata: false,
+            max_miss_snp: Some(0.4),
+            max_miss_ind: Some(0.4),
+            maf: None,
+            max_maf: None,
+            hwe: None,
+            numchrom: 22,
+            hashcheck: false,
+            familynames: true,
+            outputgroup: false,
+        };
+        run_convert(&cfg).unwrap();
+
+        let n_snp = std::fs::read_to_string(&snp_out).unwrap().lines().count();
+        let n_ind = std::fs::read_to_string(&ind_out).unwrap().lines().count();
+        assert_eq!(n_ind, 1, "mind must run first and drop S1 (got {n_ind} samples)");
+        assert_eq!(n_snp, 4, "all SNPs survive over the post-mind sample (got {n_snp})");
     }
 }
 
