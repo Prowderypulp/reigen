@@ -34,9 +34,33 @@
 use anyhow::{bail, Result};
 use rayon::prelude::*;
 
-/// Block size in cells per axis. 32 cells = 8 bytes; nice fit for cache lines
-/// and avoids overhead of tiny tiles. Must be a multiple of 4.
-pub const BLOCK: usize = 32;
+/// Block size in cells per axis. Must be a multiple of 4 so that column tiles
+/// are 4-aligned and hit the gather4+LUT fast path (only the final edge tile,
+/// when `cols % 4 != 0`, falls back to cell-by-cell). 128 is optimal for tall
+/// AADR-shaped matrices.
+pub const BLOCK: usize = 128;
+
+/// Gather LUT: maps a source byte (4 packed 2-bit cells) to a u32 with
+/// each column's cell pre-shifted to bits 7:6 of its respective byte.
+///
+/// Entry layout for input byte with cells [c0, c1, c2, c3]:
+///   bits 31:30 = c0, bits 23:22 = c1, bits 15:14 = c2, bits 7:6 = c3
+///
+/// Usage: `GATHER_LUT[src_byte]` then shift right by `2 * row_index`
+/// before OR-combining 4 rows into one output byte.
+const GATHER_LUT: [u32; 256] = {
+    let mut lut = [0u32; 256];
+    let mut b = 0u32;
+    while b < 256 {
+        let c0 = (b >> 6) & 0b11;
+        let c1 = (b >> 4) & 0b11;
+        let c2 = (b >> 2) & 0b11;
+        let c3 = b & 0b11;
+        lut[b as usize] = (c0 << 30) | (c1 << 22) | (c2 << 14) | (c3 << 6);
+        b += 1;
+    }
+    lut
+};
 
 /// Public entry point. Dispatches to blocked implementation.
 pub fn transpose_packed(src: &[u8], rows: usize, cols: usize, dst: &mut [u8]) -> Result<()> {
@@ -179,10 +203,11 @@ fn transpose_packed_blocked(
 ///
 /// Tile sizes ≤ BLOCK in each direction; may be smaller on matrix edges.
 ///
-/// Implementation: straightforward cell-level transpose over the tile. The
-/// tiling is what gives cache locality — both source and destination slices
-/// fit comfortably in L1. No bit-parallel magic here yet (that would be the
-/// next optimization if transpose becomes the bottleneck vs I/O).
+/// For aligned tiles (`col_start` and tile width both multiples of 4), uses the
+/// gather4+LUT kernel: it reverses the inner loop to gather one byte from each
+/// of 4 source rows and emit 4 sequential output bytes, turning the scatter
+/// (4 random writes per source byte) into sequential writes through 4 output
+/// rows. Falls back to cell-by-cell for edge tiles with non-4-aligned columns.
 #[inline]
 fn transpose_tile(
     src: &[u8],
@@ -194,16 +219,97 @@ fn transpose_tile(
     dst_tile: &mut [u8],
     col_bytes: usize,
 ) {
-    for r in r_start..r_end {
-        let src_row = &src[r * row_bytes..(r + 1) * row_bytes];
-        for c in col_start..col_end {
-            let v = get_cell(src_row, c);
-            if v != 0 {
-                // Output row index within the tile:
-                let tile_row = c - col_start;
-                let dst_row = &mut dst_tile[tile_row * col_bytes..(tile_row + 1) * col_bytes];
-                set_cell(dst_row, r, v);
+    let tile_cols = col_end - col_start;
+    let aligned = (col_start % 4 == 0) && (tile_cols % 4 == 0);
+
+    if aligned {
+        transpose_tile_gather4_lut(
+            src, row_bytes, r_start, r_end, col_start, col_end, dst_tile, col_bytes,
+        );
+    } else {
+        // Edge tile fallback: cell-by-cell.
+        for r in r_start..r_end {
+            let src_row = &src[r * row_bytes..(r + 1) * row_bytes];
+            for c in col_start..col_end {
+                let v = get_cell(src_row, c);
+                if v != 0 {
+                    // Output row index within the tile:
+                    let tile_row = c - col_start;
+                    let dst_row = &mut dst_tile[tile_row * col_bytes..(tile_row + 1) * col_bytes];
+                    set_cell(dst_row, r, v);
+                }
             }
+        }
+    }
+}
+
+/// Transpose one tile using gather4+LUT. Processes 4 input columns and 4 input
+/// rows simultaneously, producing 4 complete output bytes per inner iteration.
+/// Writes are sequential through the 4 active output rows.
+///
+/// Requires: `col_start % 4 == 0` and `(col_end - col_start) % 4 == 0`.
+fn transpose_tile_gather4_lut(
+    src: &[u8],
+    row_bytes: usize,
+    r_start: usize,
+    r_end: usize,
+    col_start: usize,
+    col_end: usize,
+    dst_tile: &mut [u8],
+    col_bytes: usize,
+) {
+    let col_byte_start = col_start / 4;
+    let col_byte_end = col_end / 4;
+
+    for cb in col_byte_start..col_byte_end {
+        let c_base = cb * 4;
+        let tile_row0 = c_base - col_start;
+        let dst_base0 = tile_row0 * col_bytes;
+        let dst_base1 = (tile_row0 + 1) * col_bytes;
+        let dst_base2 = (tile_row0 + 2) * col_bytes;
+        let dst_base3 = (tile_row0 + 3) * col_bytes;
+
+        // Main loop: process 4 input rows at a time.
+        let mut r = r_start;
+        while r + 4 <= r_end {
+            let out_byte = r / 4;
+
+            // Gather: read one byte from each of 4 source rows.
+            let g0 = GATHER_LUT[src[r * row_bytes + cb] as usize];
+            let g1 = GATHER_LUT[src[(r + 1) * row_bytes + cb] as usize];
+            let g2 = GATHER_LUT[src[(r + 2) * row_bytes + cb] as usize];
+            let g3 = GATHER_LUT[src[(r + 3) * row_bytes + cb] as usize];
+
+            // Combine: each row contributes at a different bit position.
+            let combined = g0 | (g1 >> 2) | (g2 >> 4) | (g3 >> 6);
+
+            // Write: extract each output byte.
+            let ob0 = (combined >> 24) as u8;
+            let ob1 = (combined >> 16) as u8;
+            let ob2 = (combined >> 8) as u8;
+            let ob3 = combined as u8;
+
+            if ob0 != 0 { dst_tile[dst_base0 + out_byte] |= ob0; }
+            if ob1 != 0 { dst_tile[dst_base1 + out_byte] |= ob1; }
+            if ob2 != 0 { dst_tile[dst_base2 + out_byte] |= ob2; }
+            if ob3 != 0 { dst_tile[dst_base3 + out_byte] |= ob3; }
+
+            r += 4;
+        }
+
+        // Remainder: handle leftover rows (< 4) when tile height isn't a
+        // multiple of 4 (only the final row-tile when `rows % 4 != 0`).
+        while r < r_end {
+            let sb = src[r * row_bytes + cb];
+            if sb != 0 {
+                let dst_byte = r / 4;
+                let dst_shift = 6 - 2 * (r % 4);
+                dst_tile[dst_base0 + dst_byte] |= ((sb >> 6) & 0b11) << dst_shift;
+                dst_tile[dst_base1 + dst_byte] |= ((sb >> 4) & 0b11) << dst_shift;
+                dst_tile[dst_base2 + dst_byte] |= ((sb >> 2) & 0b11) << dst_shift;
+                dst_tile[dst_base3 + dst_byte] |= (sb & 0b11) << dst_shift;
+            }
+            r += 1;
         }
     }
 }
