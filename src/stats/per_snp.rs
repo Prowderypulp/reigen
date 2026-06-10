@@ -4,9 +4,9 @@
 /// Accumulated counters for a single SNP across all kept samples.
 #[derive(Debug, Clone, Default)]
 pub struct SnpStats {
-    pub n_hom_ref: u32, // genotype = 0
+    pub n_hom_ref: u32, // genotype = 2 (two copies of allele1 / reference)
     pub n_het: u32,     // genotype = 1
-    pub n_hom_alt: u32, // genotype = 2
+    pub n_hom_alt: u32, // genotype = 0 (zero copies of allele1 / reference)
     pub n_missing: u32, // genotype = 9 / missing
 }
 
@@ -84,9 +84,11 @@ impl SnpStats {
     #[inline]
     pub fn observe(&mut self, g: u8) {
         match g {
-            0 => self.n_hom_ref += 1,
+            // genotype = count of allele1 (reference): 2 = hom reference,
+            // 0 = hom alternate. (See EIGENSTRAT/AdmixTools convention.)
+            2 => self.n_hom_ref += 1,
             1 => self.n_het += 1,
-            2 => self.n_hom_alt += 1,
+            0 => self.n_hom_alt += 1,
             _ => self.n_missing += 1,
         }
     }
@@ -245,9 +247,11 @@ mod tests {
         assert_eq!(s.n_called(), 4);
         assert_eq!(s.n_total(), 5);
         assert!((s.miss_rate() - 0.2).abs() < 1e-10);
-        // ref freq = (2*2 + 1) / (4*2) = 5/8 = 0.625
-        assert!((s.ref_freq() - 0.625).abs() < 1e-10);
-        assert!((s.alt_freq() - 0.375).abs() < 1e-10);
+        // genotypes 0,0,1,2: ref allele (allele1) copies = one hom-ref (g=2)
+        // contributes 2, the het contributes 1 → ref freq = (2*1 + 1)/(4*2)
+        // = 3/8 = 0.375. (g=0 are hom-alt, contribute 0 reference alleles.)
+        assert!((s.ref_freq() - 0.375).abs() < 1e-10);
+        assert!((s.alt_freq() - 0.625).abs() < 1e-10);
         assert!((s.maf() - 0.375).abs() < 1e-10);
         assert!((s.obs_het() - 0.25).abs() < 1e-10);
     }

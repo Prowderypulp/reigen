@@ -18,11 +18,12 @@
 //! | `10`   | het           | `01` (g=1)       |
 //! | `11`   | hom A2        | `00` (g=0)       |
 //!
-//! Recall that in `.bim` we already swap A1/A2 so that AdmixTools allele1
-//! corresponds to PLINK A2 (see `meta/bim.rs` doc). So:
-//! - PLINK "hom A2" = two copies of `.bim` col 6 = two copies of
-//!   AdmixTools allele1 = genotype 0 in AdmixTools encoding.
-//! - PLINK "hom A1" = two copies of AdmixTools allele2 = genotype 2.
+//! `.bim` keeps the same column order as `.snp` — no allele swap (see
+//! `meta/bim.rs` doc). PLINK A1 = AdmixTools allele1, and both the PLINK
+//! `.bed` dosage and the AdmixTools `.geno` value count copies of that
+//! allele. So:
+//! - PLINK "hom A1" = two copies of allele1 = AdmixTools genotype 2.
+//! - PLINK "hom A2" = two copies of allele2 = AdmixTools genotype 0.
 //!
 //! Combined with the bit-order reverse, each 8-bit PLINK byte maps to an
 //! 8-bit AdmixTools byte via a 256-entry LUT. Same for the inverse.

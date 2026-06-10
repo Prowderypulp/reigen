@@ -85,10 +85,11 @@ pub fn write_vcf(
             } else {
                 codec::G_MISSING
             };
+            // g = copies of REF (allele1): 2 = hom REF, 0 = hom ALT.
             let gt = match g {
-                0 => "0/0",
+                2 => "0/0",
                 1 => "0/1",
-                2 => "1/1",
+                0 => "1/1",
                 _ => "./.",
             };
             write!(w, "\t{}", gt)?;
@@ -312,23 +313,29 @@ pub fn read_vcf(
 }
 
 /// Parse a VCF GT field (e.g., "0/0", "0|1", "1/1", "./.") into 0/1/2/9.
+///
+/// The returned genotype is the **count of the reference (`0`) allele**, to
+/// match the AdmixTools/EIGENSTRAT convention (`.geno` value = copies of
+/// `.snp` col 5 = allele1 = VCF REF). So `0/0` → 2, `0/1` → 1, `1/1` → 0.
+/// `cmd_vcfimport` stores REF as allele1, keeping the count consistent.
 fn parse_gt(gt: &str) -> u8 {
     let sep = if gt.contains('|') { '|' } else { '/' };
     let parts: Vec<&str> = gt.splitn(2, sep).collect();
     if parts.len() != 2 {
         return codec::G_MISSING;
     }
-    let a1 = match parts[0] {
-        "0" => 0u8,
-        "1" => 1u8,
+    // Count copies of the reference allele ("0").
+    let ref0 = match parts[0] {
+        "0" => 1u8,
+        "1" => 0u8,
         _ => return codec::G_MISSING,
     };
-    let a2 = match parts[1] {
-        "0" => 0u8,
-        "1" => 1u8,
+    let ref1 = match parts[1] {
+        "0" => 1u8,
+        "1" => 0u8,
         _ => return codec::G_MISSING,
     };
-    a1 + a2 // 0+0=0, 0+1=1, 1+0=1, 1+1=2
+    ref0 + ref1 // 0/0→2, 0/1→1, 1/0→1, 1/1→0
 }
 
 /// Parse VCF chromosome string to internal u8 representation.
@@ -369,16 +376,17 @@ mod tests {
 
     #[test]
     fn parse_gt_variants() {
-        assert_eq!(parse_gt("0/0"), 0);
+        // genotype = count of REF allele ("0"): 0/0→2, het→1, 1/1→0.
+        assert_eq!(parse_gt("0/0"), 2);
         assert_eq!(parse_gt("0/1"), 1);
         assert_eq!(parse_gt("1/0"), 1);
-        assert_eq!(parse_gt("1/1"), 2);
+        assert_eq!(parse_gt("1/1"), 0);
         assert_eq!(parse_gt("./."), codec::G_MISSING);
         assert_eq!(parse_gt(".|."), codec::G_MISSING);
         // Phased
-        assert_eq!(parse_gt("0|0"), 0);
+        assert_eq!(parse_gt("0|0"), 2);
         assert_eq!(parse_gt("0|1"), 1);
-        assert_eq!(parse_gt("1|1"), 2);
+        assert_eq!(parse_gt("1|1"), 0);
     }
 
     #[test]
@@ -445,9 +453,10 @@ mod tests {
             },
         ];
         // SNP-major: genotypes[snp][sample]
+        // genotype = copies of allele1 (REF): 2 = hom-ref, 0 = hom-alt.
         let genotypes = vec![
-            vec![0u8, 1],              // rs1: S1=hom_ref, S2=het
-            vec![2, codec::G_MISSING], // rs2: S1=hom_alt, S2=missing
+            vec![0u8, 1],              // rs1: S1=hom_alt, S2=het
+            vec![2, codec::G_MISSING], // rs2: S1=hom_ref, S2=missing
         ];
 
         let dir = tempfile::tempdir().unwrap();

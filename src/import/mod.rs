@@ -201,10 +201,13 @@ pub fn run_import(args: ImportArgs) -> Result<()> {
                 continue;
             }
 
-            // Hom: allele1='0' (unknown ref), allele2=observed, geno=2.
+            // genotype = copies of allele1 (the counted allele), matching the
+            // AdmixTools/EIGENSTRAT convention used by every other code path.
+            // Hom: observed allele goes in allele1, geno=2 (two copies);
+            //   allele2='0' marks the unknown second/reference allele.
             // Het: sort alphabetically so orientation is deterministic; geno=1.
             let (allele1, allele2, geno) = if a == b {
-                (b'0', a, 2u8)
+                (a, b'0', 2u8)
             } else {
                 let (al1, al2) = if a < b { (a, b) } else { (b, a) };
                 (al1, al2, 1u8)

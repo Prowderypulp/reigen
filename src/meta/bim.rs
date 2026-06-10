@@ -18,22 +18,23 @@
 //!
 //! # A1 / A2 semantics
 //!
-//! In PLINK `.bim`:
-//! - col 5 = A1 (usually minor allele; PLINK historically put the "1"
-//!   allele here — matches the "variant" allele in AdmixTools)
-//! - col 6 = A2 (usually major; matches AdmixTools "reference" allele)
-//!
-//! Our `SnpRow` holds `allele1` = AdmixTools allele1 = EIGENSTRAT "reference"
-//! = `.snp` col 5 = **A2** in PLINK. The swap happens here at the I/O
-//! boundary:
+//! PLINK `.bim` col 5 = A1, col 6 = A2. The PLINK `.bed` genotype counts
+//! copies of A1 (code `00` = homozygous A1). AdmixTools/EIGENSTRAT stores the
+//! same relationship: `.snp` col 5 = allele1 and the `.geno` value counts
+//! copies of allele1 (`2` = homozygous allele1). The two formats use the
+//! *same* column order, so there is **no allele swap** across this boundary:
 //!
 //! | column |     .snp     |     .bim     |
 //! |--------|--------------|--------------|
-//! |    5   |  allele1 (0) | allele2 (A1) |
-//! |    6   |  allele2 (2) | allele1 (A2) |
+//! |    5   |  allele1     | allele1 (A1) |
+//! |    6   |  allele2     | allele2 (A2) |
 //!
-//! Translated: reading `.bim`, `bim[5]` → `SnpRow.allele2` and
-//! `bim[6]` → `SnpRow.allele1`. Writing `.bim` does the same swap.
+//! Reading `.bim`: `bim[5]` → `SnpRow.allele1`, `bim[6]` → `SnpRow.allele2`.
+//! Writing `.bim` is the identity. This matches `convertf` byte-for-byte
+//! (verified: convertf EIGENSTRAT→PACKEDPED leaves col 5 in A1, and the
+//! `.bed` for `geno=2` is `00`=homozygous A1). The genotype 0↔2 polarity is
+//! carried entirely by the `.bed` codec LUT in `geno/packed_ped.rs`; do not
+//! re-introduce a swap here.
 
 use super::{split_lines, SnpRow};
 use anyhow::{anyhow, bail, Context, Result};
@@ -68,7 +69,7 @@ pub fn write(path: &Path, rows: &[SnpRow], numchrom: u32) -> Result<()> {
     for r in rows {
         // PLINK emits chrom as numeric; we follow that convention. Tools
         // that want literal X/Y/MT can post-process.
-        // Swap: bim col 5 = allele2, bim col 6 = allele1 (see module doc).
+        // No swap: bim col 5 (A1) = allele1, bim col 6 (A2) = allele2.
         writeln!(
             w,
             "{}\t{}\t{}\t{}\t{}\t{}",
@@ -76,8 +77,8 @@ pub fn write(path: &Path, rows: &[SnpRow], numchrom: u32) -> Result<()> {
             r.id,
             r.genetic_pos,
             r.physical_pos,
-            r.allele2 as char,
             r.allele1 as char,
+            r.allele2 as char,
         )?;
     }
     w.flush()?;
@@ -108,14 +109,14 @@ fn parse_bim_line(line: &[u8], numchrom: u32) -> Result<SnpRow> {
     if a1.len() != 1 || a2.len() != 1 {
         bail!("multi-char allele in .bim not supported");
     }
-    // Swap at boundary: PLINK A1 (col 5) → SnpRow.allele2.
+    // No swap: PLINK A1 (col 5) → SnpRow.allele1, A2 (col 6) → allele2.
     Ok(SnpRow {
         id,
         chrom,
         genetic_pos,
         physical_pos,
-        allele1: a2[0], // PLINK A2 → AdmixTools allele1
-        allele2: a1[0], // PLINK A1 → AdmixTools allele2
+        allele1: a1[0], // PLINK A1 → AdmixTools allele1
+        allele2: a2[0], // PLINK A2 → AdmixTools allele2
     })
 }
 
@@ -167,16 +168,16 @@ mod tests {
     }
 
     #[test]
-    fn reads_bim_swaps_alleles() {
+    fn reads_bim_no_swap() {
         // PLINK .bim: chrom id gen phys a1 a2
         let f = write_tmp("1\trs1\t0.001\t752566\tG\tA\n");
         let rows = read(f.path(), 22).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "rs1");
         assert_eq!(rows[0].chrom, 1);
-        // Swap: PLINK A1=G → allele2, PLINK A2=A → allele1
-        assert_eq!(rows[0].allele1, b'A');
-        assert_eq!(rows[0].allele2, b'G');
+        // No swap: PLINK A1=G → allele1, PLINK A2=A → allele2.
+        assert_eq!(rows[0].allele1, b'G');
+        assert_eq!(rows[0].allele2, b'A');
     }
 
     #[test]
@@ -239,8 +240,8 @@ mod tests {
         let f = tempfile::NamedTempFile::new().unwrap();
         write(f.path(), &[row], 22).unwrap();
         let text = std::fs::read_to_string(f.path()).unwrap();
-        // bim col 5 (A1) should be allele2 ('G'); col 6 (A2) should be allele1 ('A').
-        assert!(text.contains("\tG\tA\n"), "got: {text:?}");
+        // No swap: bim col 5 (A1) = allele1 ('A'); col 6 (A2) = allele2 ('G').
+        assert!(text.contains("\tA\tG\n"), "got: {text:?}");
         assert!(text.starts_with("1\trs1"));
     }
 

@@ -4,10 +4,10 @@
 /// Accumulated counters for a single sample across all kept SNPs.
 #[derive(Debug, Clone, Default)]
 pub struct SampleStats {
-    pub n_hom_ref: u32,
-    pub n_het: u32,
-    pub n_hom_alt: u32,
-    pub n_missing: u32,
+    pub n_hom_ref: u32, // genotype = 2 (two copies of allele1 / reference)
+    pub n_het: u32,     // genotype = 1
+    pub n_hom_alt: u32, // genotype = 0 (zero copies of allele1 / reference)
+    pub n_missing: u32, // genotype = 9 / missing
     /// Sum of expected heterozygosity across all non-missing SNPs for this
     /// sample, used for computing F-statistic. Accumulated as
     /// 2 * p * (1 - p) where p is the ref allele frequency at each SNP.
@@ -61,9 +61,11 @@ impl SampleStats {
     #[inline]
     pub fn observe(&mut self, g: u8) {
         match g {
-            0 => self.n_hom_ref += 1,
+            // genotype = count of allele1 (reference): 2 = hom reference,
+            // 0 = hom alternate.
+            2 => self.n_hom_ref += 1,
             1 => self.n_het += 1,
-            2 => self.n_hom_alt += 1,
+            0 => self.n_hom_alt += 1,
             _ => self.n_missing += 1,
         }
     }
