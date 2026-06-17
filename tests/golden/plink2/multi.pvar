@@ -1,0 +1,8 @@
+##FILTER=<ID=PASS,Description="x">
+##contig=<ID=1>
+##contig=<ID=2>
+#CHROM	POS	ID	REF	ALT	FILTER
+1	1000	rs0	G	A	PASS
+1	2000	rs1	C	A,T	PASS
+1	3000	rs2	T	C	PASS
+2	4000	rs3	A	G	PASS
