@@ -559,10 +559,19 @@ fn open_reader(fmt: Format, path: &Path, nind: usize, nsnp: usize) -> Result<Box
             eigenstrat::EigenstratReader::open(path, nind, nsnp)
                 .with_context(|| format!("open {}", path.display()))?,
         )),
-        Format::PackedPed => Ok(Box::new(
-            packed_ped::PackedPedReader::open(path, nind, nsnp)
-                .with_context(|| format!("open {}", path.display()))?,
-        )),
+        Format::PackedPed => {
+            let bim_path = path.with_extension("bim");
+            let flip_02_mask = if bim_path.exists() {
+                meta::bim::read_flip_02_mask(&bim_path)
+                    .with_context(|| format!("reading {} for the A1=0 flip-mask", bim_path.display()))?
+            } else {
+                Vec::new()
+            };
+            Ok(Box::new(
+                packed_ped::PackedPedReader::open_with_flip_mask(path, nind, nsnp, flip_02_mask)
+                    .with_context(|| format!("open {}", path.display()))?,
+            ))
+        }
         Format::Ped => bail!("PED text format not supported (use PACKEDPED)"),
         Format::Tgeno => Ok(Box::new(
             tgeno::TgenoReader::open(path, nind, nsnp)

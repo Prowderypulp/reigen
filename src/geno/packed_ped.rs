@@ -56,6 +56,9 @@ static PLINK_TO_AM: [u8; 256] = build_plink_to_am();
 /// Inverse: AM-encoded byte → PLINK-encoded byte.
 static AM_TO_PLINK: [u8; 256] = build_am_to_plink();
 
+/// Canonical AM byte with genotype polarity flipped: 0↔2, 1/missing unchanged.
+static AM_FLIP_02: [u8; 256] = build_am_flip_02();
+
 const fn recode_plink_to_am(two: u8) -> u8 {
     // 00→10, 01→11, 10→01, 11→00
     match two & 0b11 {
@@ -117,6 +120,32 @@ const fn build_am_to_plink() -> [u8; 256] {
     t
 }
 
+const fn flip_am_2bit(two: u8) -> u8 {
+    match two & 0b11 {
+        0b00 => 0b10,
+        0b10 => 0b00,
+        _ => two & 0b11,
+    }
+}
+
+const fn build_am_flip_02() -> [u8; 256] {
+    let mut t = [0u8; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let b = i as u8;
+        let s0 = (b >> 6) & 0b11;
+        let s1 = (b >> 4) & 0b11;
+        let s2 = (b >> 2) & 0b11;
+        let s3 = b & 0b11;
+        t[i] = (flip_am_2bit(s0) << 6)
+            | (flip_am_2bit(s1) << 4)
+            | (flip_am_2bit(s2) << 2)
+            | flip_am_2bit(s3);
+        i += 1;
+    }
+    t
+}
+
 // ======================================================================
 // Reader
 // ======================================================================
@@ -132,6 +161,8 @@ pub struct PackedPedReader {
     am_rec_bytes: usize,
     /// Scratch for the last (possibly partial) byte during recode.
     last_byte_valid_samples: usize,
+    /// Per-SNP flag: this record needs a 0↔2 flip after PLINK→canonical decode.
+    flip_02_mask: Vec<bool>,
     next_idx: usize,
 }
 
@@ -142,6 +173,15 @@ impl PackedPedReader {
     }
 
     pub fn open(path: &Path, nind: usize, nsnp: usize) -> Result<Self> {
+        Self::open_with_flip_mask(path, nind, nsnp, Vec::new())
+    }
+
+    pub fn open_with_flip_mask(
+        path: &Path,
+        nind: usize,
+        nsnp: usize,
+        flip_02_mask: Vec<bool>,
+    ) -> Result<Self> {
         let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
 
         // Verify magic without mmap'ing an empty file.
@@ -200,6 +240,15 @@ impl PackedPedReader {
 
         let last_byte_valid_samples = ((nind - 1) % 4) + 1;
 
+        if !flip_02_mask.is_empty() && flip_02_mask.len() != nsnp {
+            bail!(
+                "flip mask len {} != nsnp {} for {}",
+                flip_02_mask.len(),
+                nsnp,
+                path.display()
+            );
+        }
+
         Ok(Self {
             mmap,
             nind,
@@ -207,6 +256,7 @@ impl PackedPedReader {
             plink_rec_bytes,
             am_rec_bytes,
             last_byte_valid_samples,
+            flip_02_mask,
             next_idx: 0,
         })
     }
@@ -244,6 +294,17 @@ impl GenoReader for PackedPedReader {
         // Translate byte-at-a-time via LUT.
         for (i, &b) in src.iter().enumerate() {
             dst[i] = PLINK_TO_AM[b as usize];
+        }
+
+        if self
+            .flip_02_mask
+            .get(self.next_idx)
+            .copied()
+            .unwrap_or(false)
+        {
+            for b in dst.iter_mut() {
+                *b = AM_FLIP_02[*b as usize];
+            }
         }
 
         // Mask trailing padding bits in the last byte to zero (AM canonical:
@@ -405,6 +466,16 @@ mod tests {
         // Expected AM MSB-first: s0=0(00), s1=1(01), s2=miss(11), s3=2(10)
         // Byte = 0b00_01_11_10
         assert_eq!(am_byte, 0b00_01_11_10);
+    }
+
+    #[test]
+    fn flip_mask_inverts_zero_vs_two_for_placeholder_a1_sites() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), [0x6c, 0x1b, 0x01, 0x03]).unwrap();
+        let mut r = PackedPedReader::open_with_flip_mask(tmp.path(), 1, 1, vec![true]).unwrap();
+        let mut buf = vec![0u8; r.record_bytes()];
+        assert!(r.read_record(&mut buf).unwrap());
+        assert_eq!(buf, vec![0x80]);
     }
 
     fn ref_bed(path: &Path, nind: usize, nsnp: usize, genotypes: &[Vec<u8>]) {

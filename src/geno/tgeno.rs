@@ -3,8 +3,9 @@
 //! # On-disk layout (v8.0.0+ of AdmixTools)
 //!
 //! - Sample-major. One record per sample.
-//! - `rlen = max(48, ceil(nsnp * 2 / 8))` bytes per record.
-//! - First record is a header (zero-padded to `rlen`):
+//! - `rlen = ceil(nsnp * 2 / 8)` bytes per record (no 48-byte minimum — that
+//!   floor applies to PACKEDANCESTRYMAP per-SNP records, NOT to TGENO).
+//! - First record is a header (fixed 48 bytes, zero-padded):
 //!     `"TGENO %d %d %x %x"` where fields are nind, nsnp, ihash, shash.
 //! - Encoding: canonical 2-bit MSB-first (same as PACKEDANCESTRYMAP).
 //!
@@ -30,15 +31,21 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-pub const MIN_RLEN: usize = 48;
 /// TGENO header is a fixed 48 bytes regardless of rlen — different from
 /// PACKEDANCESTRYMAP, where the header is padded to rlen.
 pub const HEADER_BYTES: usize = 48;
 const HEADER_MAGIC: &[u8] = b"TGENO ";
 
+/// Per-record length for TGENO = `ceil(nsnp * 2 / 8)`, with **no** minimum.
+///
+/// NOTE: unlike PACKEDANCESTRYMAP (whose per-SNP records have a 48-byte floor),
+/// AdmixTools/convertf write TGENO sample records with no minimum length — a
+/// 3-SNP file uses 1-byte records, not 48. Applying the 48-byte floor here
+/// produced files convertf silently misreads (and made reigen reject genuine
+/// convertf TGENO). Verified against convertf v8600. The header stays 48 bytes.
 #[inline]
 pub fn rlen_for(nsnp: usize) -> usize {
-    std::cmp::max(MIN_RLEN, (nsnp * 2 + 7) / 8)
+    (nsnp * 2 + 7) / 8
 }
 
 // ======================================================================
@@ -278,10 +285,13 @@ mod tests {
     use crate::geno::codec;
 
     #[test]
-    fn rlen_min_48() {
-        assert_eq!(rlen_for(1), 48);
+    fn rlen_has_no_48_floor() {
+        // Matches convertf v8600: TGENO records are ceil(nsnp*2/8), no minimum.
+        assert_eq!(rlen_for(1), 1);
+        assert_eq!(rlen_for(3), 1);
         assert_eq!(rlen_for(192), 48);
         assert_eq!(rlen_for(193), 49);
+        assert_eq!(rlen_for(256), 64);
     }
 
     #[test]
