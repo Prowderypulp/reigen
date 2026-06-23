@@ -63,6 +63,25 @@ pub fn read(path: &Path, numchrom: u32) -> Result<Vec<SnpRow>> {
     Ok(rows)
 }
 
+pub(crate) fn read_flip_02_mask(path: &Path) -> Result<Vec<bool>> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    if file.metadata()?.len() == 0 {
+        return Ok(Vec::new());
+    }
+    let mmap = unsafe { Mmap::map(&file) }.with_context(|| format!("mmap {}", path.display()))?;
+
+    let mut mask = Vec::new();
+    for (lineno, line) in split_lines(&mmap).enumerate() {
+        let lineno = lineno + 1;
+        if line.iter().all(|&b| b.is_ascii_whitespace()) {
+            continue;
+        }
+        let flip = parse_bim_flip_02(line).with_context(|| format!("{}:{}", path.display(), lineno))?;
+        mask.push(flip);
+    }
+    Ok(mask)
+}
+
 pub fn write(path: &Path, rows: &[SnpRow], numchrom: u32) -> Result<()> {
     let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
     let mut w = BufWriter::with_capacity(256 * 1024, file);
@@ -109,25 +128,55 @@ fn parse_bim_line(line: &[u8], numchrom: u32) -> Result<SnpRow> {
     if a1.len() != 1 || a2.len() != 1 {
         bail!("multi-char allele in .bim not supported");
     }
-    // No swap: PLINK A1 (col 5) → SnpRow.allele1, A2 (col 6) → allele2.
+    let (allele1, allele2, _flip_02) = normalize_bim_alleles(a1[0], a2[0]);
     Ok(SnpRow {
         id,
         chrom,
         genetic_pos,
         physical_pos,
-        allele1: a1[0], // PLINK A1 → AdmixTools allele1
-        allele2: a2[0], // PLINK A2 → AdmixTools allele2
+        allele1,
+        allele2,
     })
 }
 
-fn parse_chrom(raw: &[u8], numchrom: u32) -> Result<u8> {
+fn parse_bim_flip_02(line: &[u8]) -> Result<bool> {
+    let mut cols = line
+        .split(|b: &u8| b.is_ascii_whitespace())
+        .filter(|c| !c.is_empty());
+    let _chrom = cols.next().ok_or_else(|| anyhow!("missing chrom"))?;
+    let _id = cols.next().ok_or_else(|| anyhow!("missing snp id"))?;
+    let _gen = cols.next().ok_or_else(|| anyhow!("missing genetic pos"))?;
+    let _phys = cols.next().ok_or_else(|| anyhow!("missing physical pos"))?;
+    let a1 = cols.next().ok_or_else(|| anyhow!("missing a1"))?;
+    let a2 = cols.next().ok_or_else(|| anyhow!("missing a2"))?;
+    if a1.len() != 1 || a2.len() != 1 {
+        bail!("multi-char allele in .bim not supported");
+    }
+    Ok(matches!((a1[0], a2[0]), (b'0', real) if real != b'0'))
+}
+
+fn normalize_bim_alleles(a1: u8, a2: u8) -> (u8, u8, bool) {
+    match (a1, a2) {
+        (b'0', b'0') => (b'X', b'X', false),
+        (b'0', real) => (real, b'X', true),
+        (real, b'0') => (real, b'X', false),
+        _ => (a1, a2, false),
+    }
+}
+
+/// Parse a PLINK-convention chromosome token (numeric or `X`/`Y`/`MT`/`XY`)
+/// into reigen's internal code. Shared with the PVAR reader so `.bim` and
+/// `.pvar` agree on the XY/MT remap (see the note below). `pub(crate)`.
+pub(crate) fn parse_chrom(raw: &[u8], numchrom: u32) -> Result<u8> {
     let s = std::str::from_utf8(raw)?;
     let up = s.to_ascii_uppercase();
     let v_plink: u32 = match up.as_str() {
         "X" => numchrom + 1,
         "Y" => numchrom + 2,
-        "MT" | "M" => numchrom + 3,
-        "XY" => numchrom + 4,
+        // Assign the PLINK *numeric* slot for each token; the remap below then
+        // converts to reigen's internal code. PLINK numbering is XY=25, MT=26.
+        "XY" => numchrom + 3,
+        "MT" | "M" => numchrom + 4,
         num => num.parse().map_err(|e| anyhow!("bad chrom: {e}"))?,
     };
     // PLINK numeric code order differs from our internal mapping:
@@ -145,7 +194,9 @@ fn parse_chrom(raw: &[u8], numchrom: u32) -> Result<u8> {
     Ok(v as u8)
 }
 
-fn chrom_to_plink_numeric(chrom_internal: u8, numchrom: u32) -> u32 {
+/// Convert reigen's internal chromosome code to a PLINK numeric code (applies
+/// the XY/MT remap). Shared with the PVAR writer. `pub(crate)`.
+pub(crate) fn chrom_to_plink_numeric(chrom_internal: u8, numchrom: u32) -> u32 {
     let c = chrom_internal as u32;
     if c == numchrom + 3 {
         numchrom + 4
@@ -271,5 +322,33 @@ mod tests {
         let mut lines = text.lines();
         assert!(lines.next().unwrap().starts_with("26\trsMT\t")); // MT -> 26 in PLINK
         assert!(lines.next().unwrap().starts_with("25\trsXY\t")); // XY -> 25 in PLINK
+    }
+
+    #[test]
+    fn parse_chrom_string_tokens_match_plink_numeric_codes() {
+        // String X/Y/XY/MT must map to the SAME internal code as the numeric
+        // PLINK codes 23/24/25/26 (XY=25, MT=26 in PLINK numbering).
+        for (s, num) in [("X", "23"), ("Y", "24"), ("XY", "25"), ("MT", "26"), ("M", "26")] {
+            assert_eq!(
+                parse_chrom(s.as_bytes(), 22).unwrap(),
+                parse_chrom(num.as_bytes(), 22).unwrap(),
+                "string {s} must match numeric {num}"
+            );
+        }
+        // And a full round trip back to PLINK numeric is order-preserving.
+        assert_eq!(chrom_to_plink_numeric(parse_chrom(b"XY", 22).unwrap(), 22), 25);
+        assert_eq!(chrom_to_plink_numeric(parse_chrom(b"MT", 22).unwrap(), 22), 26);
+    }
+
+    #[test]
+    fn normalizes_zero_placeholder_alleles_like_convertf() {
+        let f = write_tmp("1\trs1\t0.0\t100\t0\tA\n2\trs2\t0.0\t200\tA\t0\n2\trs3\t0.0\t300\t0\t0\n");
+        let rows = read(f.path(), 22).unwrap();
+        assert_eq!((rows[0].allele1, rows[0].allele2), (b'A', b'X'));
+        assert_eq!((rows[1].allele1, rows[1].allele2), (b'A', b'X'));
+        assert_eq!((rows[2].allele1, rows[2].allele2), (b'X', b'X'));
+
+        let mask = read_flip_02_mask(f.path()).unwrap();
+        assert_eq!(mask, vec![true, false, false]);
     }
 }
