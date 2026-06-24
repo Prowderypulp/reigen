@@ -56,22 +56,35 @@ pub fn read(path: &Path, familynames: bool) -> Result<Vec<IndRow>> {
     Ok(rows)
 }
 
-pub fn write(path: &Path, rows: &[IndRow], _outputgroup: bool) -> Result<()> {
+pub fn write(path: &Path, rows: &[IndRow], outputgroup: bool) -> Result<()> {
     let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
     let mut w = BufWriter::with_capacity(64 * 1024, file);
     for r in rows {
+        let iid = plink_iid(r);
+        let pheno = if outputgroup { r.pop.as_str() } else { "-9" };
         // FID IID PID MID sex pheno
-        // We write PID=MID=0, pheno=-9. outputgroup handling deferred.
+        // When requested, mirror convertf's outputgroup behavior by emitting
+        // the population label in the phenotype column.
         writeln!(
             w,
-            "{}\t{}\t0\t0\t{}\t-9",
+            "{}\t{}\t0\t0\t{}\t{}",
             r.pop,
-            r.id,
-            r.sex.as_fam_code() as char
+            iid,
+            r.sex.as_fam_code() as char,
+            pheno
         )?;
     }
     w.flush()?;
     Ok(())
+}
+
+fn plink_iid(row: &IndRow) -> &str {
+    if let Some((fid, iid)) = row.id.split_once(':') {
+        if fid == row.pop {
+            return iid;
+        }
+    }
+    row.id.as_str()
 }
 
 fn parse_fam_line(line: &[u8], familynames: bool) -> Result<IndRow> {
@@ -177,5 +190,33 @@ mod tests {
         let f = write_tmp("Pop\tS1\t0\t0\t1\n");
         let rows = read(f.path(), false).unwrap();
         assert_eq!(rows[0].sex, Sex::Male);
+    }
+
+    #[test]
+    fn write_strips_matching_family_prefix_from_iid() {
+        let rows = vec![IndRow {
+            id: "Pop1:S1".into(),
+            sex: Sex::Unknown,
+            pop: "Pop1".into(),
+            ignore: false,
+        }];
+        let f = tempfile::NamedTempFile::new().unwrap();
+        write(f.path(), &rows, false).unwrap();
+        let text = std::fs::read_to_string(f.path()).unwrap();
+        assert_eq!(text, "Pop1\tS1\t0\t0\t0\t-9\n");
+    }
+
+    #[test]
+    fn outputgroup_writes_population_to_phenotype_column() {
+        let rows = vec![IndRow {
+            id: "S1".into(),
+            sex: Sex::Male,
+            pop: "Pop1".into(),
+            ignore: false,
+        }];
+        let f = tempfile::NamedTempFile::new().unwrap();
+        write(f.path(), &rows, true).unwrap();
+        let text = std::fs::read_to_string(f.path()).unwrap();
+        assert_eq!(text, "Pop1\tS1\t0\t0\t1\tPop1\n");
     }
 }

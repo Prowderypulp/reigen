@@ -192,3 +192,50 @@ fn geno_two_is_homozygous_column_five() {
         bed_bytes[3]
     );
 }
+
+#[test]
+fn plink_to_plink_preserves_iid_without_reprefixing_family_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let bed = dir.path().join("out.bed");
+    let bim = dir.path().join("out.bim");
+    let fam = dir.path().join("out.fam");
+
+    let status = reigen()
+        .args([
+            "convert",
+            "--in-geno",
+            golden("plink/gold.bed").to_str().unwrap(),
+            "--in-snp",
+            golden("plink/gold.bim").to_str().unwrap(),
+            "--in-ind",
+            golden("plink/gold.fam").to_str().unwrap(),
+            "--out-format",
+            "packedped",
+            "--out-geno",
+            bed.to_str().unwrap(),
+            "--out-snp",
+            bim.to_str().unwrap(),
+            "--out-ind",
+            fam.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "reigen convert PLINK->PLINK failed");
+
+    let got: Vec<Vec<String>> = std::fs::read_to_string(&fam)
+        .unwrap()
+        .lines()
+        .map(|l| l.split_whitespace().map(str::to_string).collect())
+        .collect();
+    let want: Vec<Vec<String>> = std::fs::read_to_string(golden("plink/gold.fam"))
+        .unwrap()
+        .lines()
+        .map(|l| l.split_whitespace().map(str::to_string).collect())
+        .collect();
+
+    assert_eq!(got.len(), want.len());
+    for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+        assert_eq!(g[0], w[0], ".fam row {i}: FID changed");
+        assert_eq!(g[1], w[1], ".fam row {i}: IID changed");
+    }
+}

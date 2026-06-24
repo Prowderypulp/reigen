@@ -11,6 +11,7 @@
 | `PACKEDANCESTRYMAP` | SNP-major | `.geno .snp .ind` | Binary AdmixTools-style |
 | `EIGENSTRAT` | SNP-major | `.geno .snp .ind` | Text `0/1/2/9` |
 | `PACKEDPED` | SNP-major | `.bed .bim .fam` | PLINK BED family |
+| `PLINK2` | SNP-major | `.pgen .pvar .psam` | PLINK 2 binary; biallelic hardcalls only |
 | `TGENO` | Sample-major | `.geno .snp .ind` | Binary sample-major |
 | `VCF` | SNP-major | `.vcf` | `export` writes VCF, `vcfimport` reads biallelic SNPs |
 
@@ -26,6 +27,10 @@ Most subcommands accept either:
 2. explicit files (`--in-geno`, `--in-snp`, `--in-ind`) where supported.
 
 Most writers accept `-o/--out-prefix <prefix>` and derive output extensions from `--out-format`.
+
+**PLINK2 auto-detection:** When `-i` is used and `<prefix>.pgen` exists, reigen
+auto-selects `PLINK2` format and derives `.pvar`/`.psam` paths. For output,
+`--out-format plink2` (aliases: `pgen`, `plink2_binary`) writes `.pgen`/`.pvar`/`.psam`.
 
 ---
 

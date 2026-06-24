@@ -61,15 +61,18 @@ pub fn write_vcf(
     // --- Records ---
     for (snp_idx, snp) in snps.iter().enumerate() {
         let chrom_str = chrom_to_vcf_string(snp.chrom, numchrom, chr_prefix);
-        let ref_allele = if snp.allele1 == b'0' || snp.allele1 == b'X' {
+        // REF = allele2 (reference allele), ALT = allele1 (counted/alternate allele)
+        // Missing/unknown REF (allele2) → 'N' (VCF 4.3 spec for unknown base)
+        let ref_allele = if snp.allele2 == b'0' || snp.allele2 == b'X' {
+            'N'
+        } else {
+            snp.allele2 as char
+        };
+        // Missing ALT (allele1) → '.' (monomorphic site)
+        let alt_allele = if snp.allele1 == b'0' || snp.allele1 == b'X' {
             '.'
         } else {
             snp.allele1 as char
-        };
-        let alt_allele = if snp.allele2 == b'0' || snp.allele2 == b'X' {
-            '.'
-        } else {
-            snp.allele2 as char
         };
 
         write!(
@@ -85,11 +88,11 @@ pub fn write_vcf(
             } else {
                 codec::G_MISSING
             };
-            // g = copies of REF (allele1): 2 = hom REF, 0 = hom ALT.
+            // g = count of allele1 (ALT): 0 = hom REF, 1 = het, 2 = hom ALT
             let gt = match g {
-                2 => "0/0",
+                0 => "0/0",
                 1 => "0/1",
-                0 => "1/1",
+                2 => "1/1",
                 _ => "./.",
             };
             write!(w, "\t{}", gt)?;
@@ -174,7 +177,11 @@ pub fn read_vcf(
 
     for line_result in reader.lines() {
         let line = line_result.with_context(|| format!("read line from {}", path.display()))?;
-        let line = line.trim_end();
+        // `lines()` already drops the `\n`/`\r\n`. Strip only a stray `\r`, NOT
+        // trailing tabs: `trim_end()` would delete trailing empty tab-separated
+        // fields (e.g. an empty last sample column), silently dropping genotype
+        // columns (B-106).
+        let line = line.trim_end_matches('\r');
 
         if line.starts_with("##") {
             continue;
@@ -314,28 +321,27 @@ pub fn read_vcf(
 
 /// Parse a VCF GT field (e.g., "0/0", "0|1", "1/1", "./.") into 0/1/2/9.
 ///
-/// The returned genotype is the **count of the reference (`0`) allele**, to
-/// match the AdmixTools/EIGENSTRAT convention (`.geno` value = copies of
-/// `.snp` col 5 = allele1 = VCF REF). So `0/0` → 2, `0/1` → 1, `1/1` → 0.
-/// `cmd_vcfimport` stores REF as allele1, keeping the count consistent.
+/// The returned genotype is the **count of the ALT allele (`"1"`)**, matching
+/// reigen's internal convention where `g = count(allele1)`. VCF `0` = REF,
+/// `1` = ALT. So `0/0` → 0, `0/1` → 1, `1/1` → 2.
 fn parse_gt(gt: &str) -> u8 {
     let sep = if gt.contains('|') { '|' } else { '/' };
     let parts: Vec<&str> = gt.splitn(2, sep).collect();
     if parts.len() != 2 {
         return codec::G_MISSING;
     }
-    // Count copies of the reference allele ("0").
-    let ref0 = match parts[0] {
-        "0" => 1u8,
-        "1" => 0u8,
+    // Count copies of the ALT allele ("1").
+    let alt0 = match parts[0] {
+        "1" => 1u8,
+        "0" => 0u8,
         _ => return codec::G_MISSING,
     };
-    let ref1 = match parts[1] {
-        "0" => 1u8,
-        "1" => 0u8,
+    let alt1 = match parts[1] {
+        "1" => 1u8,
+        "0" => 0u8,
         _ => return codec::G_MISSING,
     };
-    ref0 + ref1 // 0/0→2, 0/1→1, 1/0→1, 1/1→0
+    alt0 + alt1 // 0/0→0, 0/1→1, 1/0→1, 1/1→2
 }
 
 /// Parse VCF chromosome string to internal u8 representation.
@@ -376,17 +382,17 @@ mod tests {
 
     #[test]
     fn parse_gt_variants() {
-        // genotype = count of REF allele ("0"): 0/0→2, het→1, 1/1→0.
-        assert_eq!(parse_gt("0/0"), 2);
+        // genotype = count of ALT allele ("1"): 0/0→0, het→1, 1/1→2.
+        assert_eq!(parse_gt("0/0"), 0);
         assert_eq!(parse_gt("0/1"), 1);
         assert_eq!(parse_gt("1/0"), 1);
-        assert_eq!(parse_gt("1/1"), 0);
+        assert_eq!(parse_gt("1/1"), 2);
         assert_eq!(parse_gt("./."), codec::G_MISSING);
         assert_eq!(parse_gt(".|."), codec::G_MISSING);
         // Phased
-        assert_eq!(parse_gt("0|0"), 2);
+        assert_eq!(parse_gt("0|0"), 0);
         assert_eq!(parse_gt("0|1"), 1);
-        assert_eq!(parse_gt("1|1"), 0);
+        assert_eq!(parse_gt("1|1"), 2);
     }
 
     #[test]
@@ -426,16 +432,16 @@ mod tests {
                 chrom: 1,
                 genetic_pos: 0.0,
                 physical_pos: 100,
-                allele1: b'A',
-                allele2: b'G',
+                allele1: b'A', // ALT (counted)
+                allele2: b'G', // REF
             },
             SnpRow {
                 id: "rs2".into(),
                 chrom: 2,
                 genetic_pos: 0.0,
                 physical_pos: 200,
-                allele1: b'C',
-                allele2: b'T',
+                allele1: b'C', // ALT (counted)
+                allele2: b'T', // REF
             },
         ];
         let inds = vec![
@@ -453,10 +459,10 @@ mod tests {
             },
         ];
         // SNP-major: genotypes[snp][sample]
-        // genotype = copies of allele1 (REF): 2 = hom-ref, 0 = hom-alt.
+        // genotype = count of allele1 (ALT): 0 = hom-REF, 1 = het, 2 = hom-ALT
         let genotypes = vec![
-            vec![0u8, 1],              // rs1: S1=hom_alt, S2=het
-            vec![2, codec::G_MISSING], // rs2: S1=hom_ref, S2=missing
+            vec![0u8, 1],              // rs1: S1=hom-REF (0/0), S2=het (0/1)
+            vec![2, codec::G_MISSING], // rs2: S1=hom-ALT (1/1), S2=missing
         ];
 
         let dir = tempfile::tempdir().unwrap();
@@ -469,16 +475,20 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(stats.kept_biallelic_snp, 2);
 
-        // Check record 0
+        // Check record 0: REF=G, ALT=A
         assert_eq!(records[0].chrom, 1);
         assert_eq!(records[0].pos, 100);
         assert_eq!(records[0].id, "rs1");
+        assert_eq!(records[0].ref_allele, b'G'); // allele2
+        assert_eq!(records[0].alt_allele, b'A'); // allele1
         assert_eq!(records[0].genotypes, vec![0, 1]);
 
-        // Check record 1
+        // Check record 1: REF=T, ALT=C
         assert_eq!(records[1].chrom, 2);
         assert_eq!(records[1].pos, 200);
         assert_eq!(records[1].id, "rs2");
+        assert_eq!(records[1].ref_allele, b'T'); // allele2
+        assert_eq!(records[1].alt_allele, b'C'); // allele1
         assert_eq!(records[1].genotypes, vec![2, codec::G_MISSING]);
     }
 }
