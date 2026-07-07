@@ -78,5 +78,7 @@ cargo build --release
 ## Documentation
 For a detailed guide on all subcommands, filters, and format specifications, see [DOCUMENTATION.md](DOCUMENTATION.md).
 
+Recent changes are tracked in [CHANGELOG.md](CHANGELOG.md). PGEN↔PAM conversion is validated cell-by-cell against standard `plink2` in both directions (`tests/plink2_pam_oracle.rs`, self-skips when `plink2` is absent).
+
 ## License
 Licensed under the [GNU General Public License v3.0](LICENSE).

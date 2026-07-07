@@ -49,6 +49,10 @@ Common filters:
 - region filters: `--chrom`, `--from-bp`, `--to-bp`, `--no-xdata`
 - QC filters: `--maf`, `--max-maf`, `--hwe`, `--max-miss-snp` (alias: `--geno`), `--mind`
 
+PLINK 2 notes:
+- scope is **biallelic, unphased hard-calls**; `PLINK2` genotypes use `g = count(allele1)` with `allele1 = ALT` (PVAR col-5), the same polarity as PACKEDANCESTRYMAP/EIGENSTRAT — so `PGEN`↔`PAM` conversion preserves genotypes and allele labels exactly.
+- multiallelic (comma-`ALT`) variants are dropped and listed in a `<out-geno>.pgen-drop.tsv` report (mirroring `merge`'s `.missnp`), with the genotype stream kept aligned to the retained SNPs.
+
 ### 3.2 `filter`
 Subset/filter a dataset (same filtering surface as `convert`).
 
