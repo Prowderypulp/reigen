@@ -10,6 +10,10 @@
 //!     converts PGEN -> PAM, and we decode the PAM and compare cell-by-cell.
 //!   * WRITE (PAM -> PGEN): reigen writes the PGEN (via EIGENSTRAT -> PAM -> PGEN),
 //!     `plink2` reads it and exports back to VCF, and we compare GT to truth.
+//!   * WRITE, direct (PAM -> PGEN): a genuine binary PACKEDANCESTRYMAP fixture is
+//!     authored independently (correct AdmixTools header hashes), reigen converts
+//!     it to PGEN, `plink2` exports it back to VCF, and we compare GT to truth.
+//!     This isolates the PAM reader + PGEN writer with no EIGENSTRAT hop.
 //!
 //! Polarity (the B-013 trap): reigen's `g = count(allele1)` and `allele1 = ALT`.
 //! Truth here is authored as **ALT dosage** and checked against the ALT allele
@@ -154,9 +158,6 @@ fn write_vcf(path: &Path, samples: &[String], variants: &[Variant]) {
 /// the canonical `g = count(allele1)` equals the authored ALT dosage.
 fn write_eigenstrat(dir: &Path, samples: &[String], variants: &[Variant]) -> (PathBuf, PathBuf, PathBuf) {
     let geno = dir.join("src.geno");
-    let snp = dir.join("src.snp");
-    let ind = dir.join("src.ind");
-
     let mut g = String::new();
     for v in variants {
         for &d in &v.dose {
@@ -170,23 +171,67 @@ fn write_eigenstrat(dir: &Path, samples: &[String], variants: &[Variant]) -> (Pa
         g.push('\n');
     }
     std::fs::write(&geno, g).unwrap();
+    let (snp, ind) = write_snp_ind(dir, samples, variants, "src");
+    (geno, snp, ind)
+}
 
+/// Author the `.snp` (`id chrom cm pos allele1(=ALT) allele2(=REF)`) and `.ind`
+/// text sidecars shared by EIGENSTRAT and PACKEDANCESTRYMAP.
+fn write_snp_ind(dir: &Path, samples: &[String], variants: &[Variant], stem: &str) -> (PathBuf, PathBuf) {
+    let snp = dir.join(format!("{stem}.snp"));
+    let ind = dir.join(format!("{stem}.ind"));
     let mut s = String::new();
     for v in variants {
-        // id chrom cm pos allele1(=ALT) allele2(=REF)
         s.push_str(&format!(
             "{} {} {:.6} {} {} {}\n",
             v.id, v.chrom, v.cm, v.pos, v.alt, v.reff
         ));
     }
     std::fs::write(&snp, s).unwrap();
-
     let mut i = String::new();
     for smp in samples {
         i.push_str(&format!("{smp} U Pop0\n"));
     }
     std::fs::write(&ind, i).unwrap();
+    (snp, ind)
+}
 
+/// Author a genuine binary PACKEDANCESTRYMAP `.geno` (plus `.snp`/`.ind`) from
+/// the truth matrix, independent of reigen. Layout (per `packed_am.rs`):
+/// `rlen = max(48, ceil(nind*2/8))` per record; record 0 is the zero-padded
+/// header `"GENO <nind> <nsnp> <ihash> <shash>"`; each SNP record packs
+/// `g = count(allele1) = ALT dosage` as 2-bit **MSB-first** (`00/01/10/11` =
+/// `0/1/2/missing`), zero-padded to `rlen`. Header hashes are the real AdmixTools
+/// `hasharr` values so the fixture passes reigen's hashcheck without a bypass.
+fn write_pam(dir: &Path, samples: &[String], variants: &[Variant]) -> (PathBuf, PathBuf, PathBuf) {
+    let nind = samples.len();
+    let rlen = std::cmp::max(48, (nind * 2 + 7) / 8);
+    let mut buf = Vec::new();
+
+    let ihash = reigen::hash::hasharr_owned(samples);
+    let snp_ids: Vec<&str> = variants.iter().map(|v| v.id).collect();
+    let shash = reigen::hash::hasharr(&snp_ids);
+    let mut header = format!("GENO {} {} {:x} {:x}", nind, variants.len(), ihash, shash).into_bytes();
+    header.resize(rlen, 0);
+    buf.extend_from_slice(&header);
+
+    for v in variants {
+        let mut rec = vec![0u8; rlen];
+        for (i, &d) in v.dose.iter().enumerate() {
+            let two = match d {
+                0 => 0b00,
+                1 => 0b01,
+                2 => 0b10,
+                _ => 0b11,
+            };
+            rec[i / 4] |= two << (6 - 2 * (i % 4)); // MSB-first
+        }
+        buf.extend_from_slice(&rec);
+    }
+
+    let geno = dir.join("in.geno");
+    std::fs::write(&geno, buf).unwrap();
+    let (snp, ind) = write_snp_ind(dir, samples, variants, "in");
     (geno, snp, ind)
 }
 
@@ -304,16 +349,63 @@ fn write_pam_to_pgen_matches_plink2_oracle() {
     let magic = std::fs::read(out.with_extension("pgen")).unwrap();
     assert_eq!(&magic[0..3], &[0x6c, 0x1b, 0x02], "reigen PGEN mode-0x02 magic");
 
-    // 3. *Standard plink2* reads reigen's PGEN and exports back to VCF.
-    let back = dir.path().join("back");
+    // 3+4. Standard plink2 reads reigen's PGEN; exported GT must match truth.
+    assert_plink2_reads_pgen_as_truth(&out, &samples, &variants);
+}
+
+// ---------------------------------------------------------------------------
+// WRITE (direct): a genuine binary PAM authored independently -> reigen PGEN,
+// read back by plink2 and checked against truth. No EIGENSTRAT / reigen in the
+// source, so this isolates the PAM reader + PGEN writer.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pam_to_plink2_direct_matches_plink2_oracle() {
+    if !plink2_available() {
+        eprintln!("SKIP pam_to_plink2_direct_matches_plink2_oracle: plink2 not on PATH");
+        return;
+    }
+    let (samples, variants) = truth();
+    let dir = tempfile::tempdir().unwrap();
+
+    // 1. Author a real binary PACKEDANCESTRYMAP fixture (allele1 = ALT).
+    let (geno, snp, ind) = write_pam(dir.path(), &samples, &variants);
+
+    // Sanity: our authored PAM decodes back to truth (guards the fixture itself).
+    let pam = decode_pam(&geno, samples.len(), variants.len());
+    for (v, row) in variants.iter().zip(&pam) {
+        assert_eq!(row, &v.dose, "{}: authored PAM fixture differs from truth", v.id);
+    }
+
+    // 2. reigen: PAM -> PLINK2 (the conversion under test).
+    let out = dir.path().join("reigen");
+    convert(
+        &geno,
+        &snp,
+        &ind,
+        "plink2",
+        &out.with_extension("pgen"),
+        &out.with_extension("pvar"),
+        &out.with_extension("psam"),
+    );
+    let magic = std::fs::read(out.with_extension("pgen")).unwrap();
+    assert_eq!(&magic[0..3], &[0x6c, 0x1b, 0x02], "reigen PGEN mode-0x02 magic");
+
+    // 3+4. Standard plink2 reads reigen's PGEN; exported GT must match truth.
+    assert_plink2_reads_pgen_as_truth(&out, &samples, &variants);
+}
+
+/// Have standard `plink2` read reigen's `<prefix>.{pgen,pvar,psam}`, export it to
+/// VCF, and assert the exported `REF`/`ALT` labels and GT-derived ALT dosages
+/// match the truth matrix. A genome-wide polarity flip or an A1/A2 swap fails.
+fn assert_plink2_reads_pgen_as_truth(prefix: &Path, samples: &[String], variants: &[Variant]) {
+    let back = prefix.with_file_name("back");
     let ok = Command::new("plink2")
-        .args(["--pfile", out.to_str().unwrap(), "--export", "vcf", "--out", back.to_str().unwrap()])
+        .args(["--pfile", prefix.to_str().unwrap(), "--export", "vcf", "--out", back.to_str().unwrap()])
         .status()
         .unwrap();
     assert!(ok.success(), "plink2 failed to read reigen's PGEN");
 
-    // 4. Parse exported VCF; ALT-dosage from GT must match truth, and REF/ALT
-    //    labels must be preserved (a swap would flip the dosage semantics).
     let vcf = std::fs::read_to_string(back.with_extension("vcf")).unwrap();
     let rows: Vec<&str> = vcf.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).collect();
     assert_eq!(rows.len(), variants.len(), "exported variant count");
@@ -323,8 +415,7 @@ fn write_pam_to_pgen_matches_plink2_oracle() {
         assert_eq!(f[4], v.alt.to_string(), "{}: exported ALT must equal truth ALT", v.id);
         for (j, cell) in f[9..].iter().enumerate() {
             let gt = cell.split(':').next().unwrap();
-            let got = alt_dosage(gt);
-            assert_eq!(got, v.dose[j], "{} sample {}: exported GT {gt} != truth", v.id, samples[j]);
+            assert_eq!(alt_dosage(gt), v.dose[j], "{} sample {}: exported GT {gt} != truth", v.id, samples[j]);
         }
     }
 }
