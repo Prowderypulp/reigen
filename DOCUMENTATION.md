@@ -11,6 +11,7 @@
 | `PACKEDANCESTRYMAP` | SNP-major | `.geno .snp .ind` | Binary AdmixTools-style |
 | `EIGENSTRAT` | SNP-major | `.geno .snp .ind` | Text `0/1/2/9` |
 | `PACKEDPED` | SNP-major | `.bed .bim .fam` | PLINK BED family |
+| `PLINK2` | SNP-major | `.pgen .pvar .psam` | PLINK 2 binary; biallelic hardcalls only |
 | `TGENO` | Sample-major | `.geno .snp .ind` | Binary sample-major |
 | `VCF` | SNP-major | `.vcf` | `export` writes VCF, `vcfimport` reads biallelic SNPs |
 
@@ -26,6 +27,10 @@ Most subcommands accept either:
 2. explicit files (`--in-geno`, `--in-snp`, `--in-ind`) where supported.
 
 Most writers accept `-o/--out-prefix <prefix>` and derive output extensions from `--out-format`.
+
+**PLINK2 auto-detection:** When `-i` is used and `<prefix>.pgen` exists, reigen
+auto-selects `PLINK2` format and derives `.pvar`/`.psam` paths. For output,
+`--out-format plink2` (aliases: `pgen`, `plink2_binary`) writes `.pgen`/`.pvar`/`.psam`.
 
 ---
 
@@ -43,6 +48,10 @@ Common filters:
 - SNP filters: `--snps` (aliases: `--extract`, `--snplist`), `--badsnp` (alias: `--exclude`)
 - region filters: `--chrom`, `--from-bp`, `--to-bp`, `--no-xdata`
 - QC filters: `--maf`, `--max-maf`, `--hwe`, `--max-miss-snp` (alias: `--geno`), `--mind`
+
+PLINK 2 notes:
+- scope is **biallelic, unphased hard-calls**; `PLINK2` genotypes use `g = count(allele1)` with `allele1 = ALT` (PVAR col-5), the same polarity as PACKEDANCESTRYMAP/EIGENSTRAT — so `PGEN`↔`PAM` conversion preserves genotypes and allele labels exactly.
+- multiallelic (comma-`ALT`) variants are dropped and listed in a `<out-geno>.pgen-drop.tsv` report (mirroring `merge`'s `.missnp`), with the genotype stream kept aligned to the retained SNPs.
 
 ### 3.2 `filter`
 Subset/filter a dataset (same filtering surface as `convert`).

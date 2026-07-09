@@ -140,9 +140,16 @@ fn hwe_exact_midp(n_aa: usize, n_ab: usize, n_bb: usize) -> f64 {
     // Let het go from start to max_het in steps of 2.
     // prob[i] = relative probability of het = start + 2*i.
 
-    // Compute all probabilities relative to het=start.
-    probs.push(1.0); // prob at het=start is 1.0 (unnormalized)
+    // Accumulate in LOG space, then exp after subtracting the max. The naive
+    // `prev_prob * ratio` recurrence overflows f64 around N≈1000 (the peak
+    // unnormalized probability relative to het=start exceeds ~1e308), turning
+    // the whole table to Inf/NaN and silently breaking `--hwe` on large
+    // cohorts. Summing log-ratios and rescaling by the max is overflow-safe for
+    // any N. (B-101)
+    let mut log_probs: Vec<f64> = Vec::with_capacity((max_het - start) / 2 + 1);
+    log_probs.push(0.0); // ln(1) at het=start
 
+    let mut cum_log = 0.0f64;
     let mut het = start + 2;
     while het <= max_het {
         let prev_het = het - 2;
@@ -150,9 +157,14 @@ fn hwe_exact_midp(n_aa: usize, n_ab: usize, n_bb: usize) -> f64 {
         let bb_at_prev = (n_b - prev_het) / 2;
         // ratio = P(het) / P(het-2)
         let ratio = (4.0 * aa_at_prev as f64 * bb_at_prev as f64) / (het as f64 * (het - 1) as f64);
-        let prev_prob = *probs.last().unwrap();
-        probs.push(prev_prob * ratio);
+        cum_log += ratio.ln(); // ratio == 0 → -inf → prob 0, which is correct
+        log_probs.push(cum_log);
         het += 2;
+    }
+
+    let max_log = log_probs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    for lp in log_probs.iter() {
+        probs.push((lp - max_log).exp());
     }
 
     // Normalize
@@ -281,6 +293,21 @@ mod tests {
     #[test]
     fn hwe_empty() {
         assert_eq!(hwe_exact_midp(0, 0, 0), 1.0);
+    }
+
+    #[test]
+    fn hwe_large_n_no_overflow() {
+        // B-101: the old raw-f64 recurrence overflowed to NaN for large N.
+        // Perfect equilibrium at N=50_000 must still yield a finite, sane p.
+        let p = hwe_exact_midp(12_500, 25_000, 12_500);
+        assert!(p.is_finite() && !p.is_nan(), "p must be finite, got {p}");
+        assert!((0.0..=1.0).contains(&p), "p in range, got {p}");
+        assert!(p > 0.5, "perfect equilibrium should not be rejected, p={p}");
+
+        // A strong het deficit at large N stays finite and tiny.
+        let p2 = hwe_exact_midp(25_000, 1_000, 24_000);
+        assert!(p2.is_finite() && !p2.is_nan(), "p2 finite, got {p2}");
+        assert!(p2 < 0.001, "large-N het deficit should be significant, p={p2}");
     }
 
     #[test]

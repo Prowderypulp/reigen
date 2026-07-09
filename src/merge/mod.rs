@@ -142,7 +142,10 @@ pub fn run_merge(args: MergeArgs) -> Result<()> {
         let snp = parsed.snp;
         let ind = parsed.ind;
         let in_fmt = crate::format::infer_input_format(&geno)?;
-        if matches!(in_fmt, Format::Eigenstrat | Format::Tgeno) {
+        // PGEN is SnpMajor but not fixed-width seekable (variable-width records,
+        // LD anchors), so — like EIGENSTRAT/TGENO — merge consumes it via a
+        // temp PAM conversion rather than `open_seekable` (plan §B6).
+        if matches!(in_fmt, Format::Eigenstrat | Format::Tgeno | Format::Plink2) {
             let td = tempfile::Builder::new()
                 .prefix("reigen-merge-autoconv-")
                 .tempdir()?;
@@ -269,6 +272,7 @@ pub fn run_merge(args: MergeArgs) -> Result<()> {
         )?),
         Format::PackedPed => Box::new(crate::geno::packed_ped::PackedPedWriter::create(&out_geno)?),
         Format::Tgeno => Box::new(crate::geno::tgeno::TgenoWriter::create(&out_geno)?),
+        Format::Plink2 => Box::new(crate::geno::pgen::PgenWriter::create(&out_geno)?),
         f => anyhow::bail!("output format {f:?} not supported for merge"),
     };
     writer.begin(plan.output_inds.len(), plan.snp_plans.len(), ihash, shash)?;
@@ -370,6 +374,10 @@ pub fn run_merge(args: MergeArgs) -> Result<()> {
         Format::PackedPed => {
             meta::bim::write(&out_snp, &out_snp_rows, args.numchrom)?;
             meta::fam::write(&out_ind, &plan.output_inds, false)?;
+        }
+        Format::Plink2 => {
+            meta::pvar::write(&out_snp, &out_snp_rows, args.numchrom)?;
+            meta::psam::write(&out_ind, &plan.output_inds, false)?;
         }
         _ => {
             meta::snp::write(&out_snp, &out_snp_rows, args.numchrom)?;

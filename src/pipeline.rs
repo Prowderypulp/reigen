@@ -32,7 +32,7 @@ use crate::filter::{
 };
 use crate::format::{self, Format};
 use crate::geno::{codec, GenoReader, GenoWriter, Layout};
-use crate::geno::{eigenstrat, packed_am, packed_ped, tgeno};
+use crate::geno::{eigenstrat, packed_am, packed_ped, pgen, tgeno};
 use crate::meta::{self, IndRow, SnpRow};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -79,6 +79,21 @@ pub fn run_convert(cfg: &ConvertConfig) -> Result<()> {
     // --- 1. Metadata.
     let snp_rows = read_input_snp(&cfg.snp_in, in_fmt, numchrom)?;
     let ind_rows = read_input_ind(&cfg.ind_in, in_fmt, cfg.familynames)?;
+
+    // PLINK 2: write the multiallelic drop report next to the output geno
+    // (mirrors merge's `.missnp`; plan §4.4 / acceptance #5).
+    if in_fmt == Format::Plink2 {
+        let dropped = meta::pvar::dropped_multiallelic(&cfg.snp_in)?;
+        if !dropped.is_empty() {
+            let report = cfg.geno_out.with_extension("pgen-drop.tsv");
+            meta::pvar::write_drop_report(&report, &dropped)?;
+            log::info!(
+                "wrote {} dropped multiallelic variant(s) to {}",
+                dropped.len(),
+                report.display()
+            );
+        }
+    }
     log::info!(
         "metadata: {} SNPs, {} samples (read in {:.2?})",
         snp_rows.len(),
@@ -489,6 +504,7 @@ pub fn read_input_snp(path: &Path, fmt: Format, numchrom: u32) -> Result<Vec<Snp
             meta::snp::read(path, numchrom)
         }
         Format::PackedPed => meta::bim::read(path, numchrom),
+        Format::Plink2 => meta::pvar::read(path, numchrom),
         Format::Ped => bail!("PED text format not supported (use PACKEDPED)"),
     }
 }
@@ -499,6 +515,7 @@ pub fn read_input_ind(path: &Path, fmt: Format, familynames: bool) -> Result<Vec
             meta::ind::read(path)
         }
         Format::PackedPed => meta::fam::read(path, familynames),
+        Format::Plink2 => meta::psam::read(path),
         Format::Ped => bail!("PED text format not supported (use PACKEDPED)"),
     }
 }
@@ -509,6 +526,7 @@ pub fn write_output_snp(path: &Path, fmt: Format, rows: &[SnpRow], numchrom: u32
             meta::snp::write(path, rows, numchrom)
         }
         Format::PackedPed => meta::bim::write(path, rows, numchrom),
+        Format::Plink2 => meta::pvar::write(path, rows, numchrom),
         Format::Ped => bail!("PED text format not supported (use PACKEDPED)"),
     }
 }
@@ -524,6 +542,7 @@ pub fn write_output_ind(
             meta::ind::write(path, rows)
         }
         Format::PackedPed => meta::fam::write(path, rows, outputgroup),
+        Format::Plink2 => meta::psam::write(path, rows, outputgroup),
         Format::Ped => bail!("PED text format not supported (use PACKEDPED)"),
     }
 }
@@ -572,6 +591,20 @@ fn open_reader(fmt: Format, path: &Path, nind: usize, nsnp: usize) -> Result<Box
                     .with_context(|| format!("open {}", path.display()))?,
             ))
         }
+        Format::Plink2 => {
+            // PGEN needs the multiallelic keep-mask so the genotype stream
+            // aligns with the biallelic-only SnpRows produced by `pvar::read`.
+            // Build it from the sibling .pvar (same fileset stem) and thread it
+            // in — the pipeline owns the mask, the codec just consumes it.
+            let pvar_path = path.with_extension("pvar");
+            let keep_ondisk = meta::pvar::keep_ondisk_mask(&pvar_path).with_context(|| {
+                format!("reading {} for the multiallelic keep-mask", pvar_path.display())
+            })?;
+            Ok(Box::new(
+                pgen::PgenReader::open(path, keep_ondisk)
+                    .with_context(|| format!("open {}", path.display()))?,
+            ))
+        }
         Format::Ped => bail!("PED text format not supported (use PACKEDPED)"),
         Format::Tgeno => Ok(Box::new(
             tgeno::TgenoReader::open(path, nind, nsnp)
@@ -586,6 +619,7 @@ fn open_writer(fmt: Format, path: &Path) -> Result<Box<dyn GenoWriter>> {
         Format::PackedAncestrymap => Ok(Box::new(packed_am::PackedAmWriter::create(path)?)),
         Format::Eigenstrat => Ok(Box::new(eigenstrat::EigenstratWriter::create(path)?)),
         Format::PackedPed => Ok(Box::new(packed_ped::PackedPedWriter::create(path)?)),
+        Format::Plink2 => Ok(Box::new(pgen::PgenWriter::create(path)?)),
         Format::Ped => bail!("PED text format not supported (use PACKEDPED)"),
         Format::Tgeno => Ok(Box::new(tgeno::TgenoWriter::create(path)?)),
         Format::Ancestrymap => bail!("ANCESTRYMAP sparse writer not implemented"),
@@ -1031,12 +1065,17 @@ pub fn resolve_paths(
                     .default_output_extensions();
                 return p_path.with_extension(gext);
             }
-            // Check for .bed first, then .geno
-            let bed = p_path.with_extension("bed");
-            if bed.exists() {
-                bed
+            // Check for .pgen first, then .bed, then .geno
+            let pgen = p_path.with_extension("pgen");
+            if pgen.exists() {
+                pgen
             } else {
-                p_path.with_extension("geno")
+                let bed = p_path.with_extension("bed");
+                if bed.exists() {
+                    bed
+                } else {
+                    p_path.with_extension("geno")
+                }
             }
         });
 
@@ -1047,7 +1086,10 @@ pub fn resolve_paths(
                     .default_output_extensions();
                 return p_path.with_extension(sext);
             }
-            if g.extension().and_then(|e| e.to_str()) == Some("bed") {
+            let gext = g.extension().and_then(|e| e.to_str());
+            if gext == Some("pgen") {
+                p_path.with_extension("pvar")
+            } else if gext == Some("bed") {
                 p_path.with_extension("bim")
             } else {
                 p_path.with_extension("snp")
@@ -1061,7 +1103,10 @@ pub fn resolve_paths(
                     .default_output_extensions();
                 return p_path.with_extension(iext);
             }
-            if g.extension().and_then(|e| e.to_str()) == Some("bed") {
+            let gext = g.extension().and_then(|e| e.to_str());
+            if gext == Some("pgen") {
+                p_path.with_extension("psam")
+            } else if gext == Some("bed") {
                 p_path.with_extension("fam")
             } else {
                 p_path.with_extension("ind")

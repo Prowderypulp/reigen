@@ -6,3 +6,12 @@
 /tmp/smoke/
 *.md
 approach.txt
+
+# large regenerable source for the plink2 LD golden fixture
+# (the committed ld.pgen is the oracle; fixtures_genesis.sh rebuilds this VCF
+# deterministically, seed 1337)
+tests/golden/plink2/ld_src.vcf
+
+# profiling / editor artifacts
+gmon.out
+.codex

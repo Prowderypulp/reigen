@@ -7,6 +7,8 @@
 pub mod bim;
 pub mod fam;
 pub mod ind;
+pub mod psam;
+pub mod pvar;
 pub mod snp;
 
 /// Split mmap bytes at `\n` without allocating. Strips trailing `\r`.

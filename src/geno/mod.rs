@@ -5,12 +5,17 @@
 //! All readers normalize to, and all writers accept, **PACKEDANCESTRYMAP
 //! 2-bit convention**:
 //!
-//! | 2 bits | meaning                |
-//! |--------|------------------------|
-//! | `00`   | genotype 0 (hom ref)   |
-//! | `01`   | genotype 1 (het)       |
-//! | `10`   | genotype 2 (hom alt)   |
-//! | `11`   | missing                |
+//! The genotype value is the **count of allele1** (`.snp`/`.bim` column 5,
+//! the EIGENSTRAT reference allele), so `2` is homozygous allele1. This
+//! polarity is preserved across every format boundary; see `meta/bim.rs` and
+//! `geno/packed_ped.rs`.
+//!
+//! | 2 bits | meaning                          |
+//! |--------|----------------------------------|
+//! | `00`   | genotype 0 (hom allele2)         |
+//! | `01`   | genotype 1 (het)                 |
+//! | `10`   | genotype 2 (hom allele1 / "ref") |
+//! | `11`   | missing                          |
 //!
 //! Within a byte, the **MSB** holds the first sample. That matches
 //! PACKEDANCESTRYMAP and TGENO on-disk layout, and differs from PLINK `.bed`
@@ -29,6 +34,7 @@ pub mod codec;
 pub mod eigenstrat;
 pub mod packed_am;
 pub mod packed_ped;
+pub mod pgen;
 pub mod tgeno;
 
 use anyhow::Result;

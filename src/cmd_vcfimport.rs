@@ -144,6 +144,7 @@ pub fn run_vcfimport(args: VcfImportArgs) -> Result<()> {
     log::info!("importing {} SNPs × {} samples", nsnp, nind);
 
     // Build SNP and sample metadata
+    // allele1 = ALT (counted), allele2 = REF (reference)
     let out_snps: Vec<SnpRow> = records
         .iter()
         .map(|r| SnpRow {
@@ -151,8 +152,8 @@ pub fn run_vcfimport(args: VcfImportArgs) -> Result<()> {
             chrom: r.chrom,
             genetic_pos: 0.0,
             physical_pos: r.pos,
-            allele1: r.ref_allele,
-            allele2: r.alt_allele,
+            allele1: r.alt_allele,
+            allele2: r.ref_allele,
         })
         .collect();
 

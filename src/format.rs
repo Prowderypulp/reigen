@@ -11,12 +11,14 @@ pub enum Format {
     Ped,
     PackedPed,
     Tgeno,
+    Plink2,
 }
 
 impl Format {
     pub fn default_output_extensions(self) -> (&'static str, &'static str, &'static str) {
         match self {
             Format::PackedPed => ("bed", "bim", "fam"),
+            Format::Plink2 => ("pgen", "pvar", "psam"),
             _ => ("geno", "snp", "ind"),
         }
     }
@@ -31,6 +33,7 @@ impl FromStr for Format {
             "ANCESTRYMAP" => Ok(Format::Ancestrymap),
             "PED" => Ok(Format::Ped),
             "PACKEDPED" => Ok(Format::PackedPed),
+            "PLINK2" | "PGEN" | "PLINK2_BINARY" => Ok(Format::Plink2),
             "TGENO" | "TRANSPOSE_GENO" => Ok(Format::Tgeno),
             other => Err(anyhow!("unknown outputformat: {other}")),
         }
@@ -44,6 +47,7 @@ pub fn infer_input_format(geno: &Path) -> Result<Format> {
         .unwrap_or("")
         .to_ascii_lowercase();
     match ext.as_str() {
+        "pgen" => Ok(Format::Plink2),
         "bed" => Ok(Format::PackedPed),
         "ped" => Ok(Format::Ped),
         "tgeno" => Ok(Format::Tgeno),

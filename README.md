@@ -8,8 +8,8 @@
 ## Key Features
 
 - **CLI toolkit**: `convert`, `import`, `merge`, `filter`, `stats`, `export`, `vcfimport`
-- **Format sniffing**: Detects PAM/EIGENSTRAT/TGENO/BED from magic + extensions
-- **Cross-format conversion**: AdmixTools and PLINK families with shared filters
+- **Format sniffing**: Detects PAM/EIGENSTRAT/TGENO/BED/PGEN from magic + extensions
+- **Cross-format conversion**: AdmixTools, PLINK 1, and PLINK 2 families with shared filters
 - **Strand-aware merge**: Allele reconciliation during multi-dataset merge
 - **VCF support**: VCF export plus biallelic SNP VCF import
 - **Streaming-first core**: Same-layout operations stream efficiently; some sample-major workflows materialize matrices
@@ -57,7 +57,9 @@ reigen vcfimport \
 ## Important CLI notes
 
 - `convert`/`filter` input file flags are `--in-geno`, `--in-snp`, `--in-ind` (or `-i/--in-prefix`)
+- `stats`/`export` input file flags are `--geno`, `--snp`, `--ind` (or `-i/--in-prefix`)
 - `filter --out-format` is optional; when omitted it defaults to inferred input format
+- PLINK2 output: `--out-format plink2` (aliases: `pgen`, `plink2_binary`) writes `.pgen`/`.pvar`/`.psam`
 - missingness aliases:
   - per-SNP: `--max-miss-snp` (alias `--geno`)
   - per-sample: `--mind`
@@ -75,6 +77,8 @@ cargo build --release
 
 ## Documentation
 For a detailed guide on all subcommands, filters, and format specifications, see [DOCUMENTATION.md](DOCUMENTATION.md).
+
+Recent changes are tracked in [CHANGELOG.md](CHANGELOG.md). PGEN↔PAM conversion is validated cell-by-cell against standard `plink2` in both directions (`tests/plink2_pam_oracle.rs`, self-skips when `plink2` is absent).
 
 ## License
 Licensed under the [GNU General Public License v3.0](LICENSE).
