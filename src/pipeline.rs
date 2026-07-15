@@ -38,6 +38,39 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+/// Total installed physical memory in bytes, read from `/proc/meminfo`.
+/// Returns `None` when it can't be determined (non-Linux, no `/proc`, or an
+/// unparseable file), leaving callers to fall back to a fixed budget.
+pub fn detect_total_memory() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    parse_meminfo_total(&meminfo)
+}
+
+/// Parse the `MemTotal:` line (reported in kB) from `/proc/meminfo` content.
+fn parse_meminfo_total(meminfo: &str) -> Option<u64> {
+    for line in meminfo.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
+}
+
+/// Default cross-layout transpose memory budget: **half of installed RAM**,
+/// so a conversion never tries to claim the whole machine. Falls back to 4 GiB
+/// when RAM can't be detected, and is floored at 512 MiB so it is always
+/// workable. Overridden by the `--max-mem` flag; also used by internal callers
+/// (filter, merge) that don't expose the flag.
+pub fn default_max_mem() -> u64 {
+    const FALLBACK: u64 = 4 * 1024 * 1024 * 1024;
+    const FLOOR: u64 = 512 * 1024 * 1024;
+    match detect_total_memory() {
+        Some(total) => (total / 2).max(FLOOR),
+        None => FALLBACK,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConvertConfig {
     pub geno_in: PathBuf,
@@ -65,6 +98,11 @@ pub struct ConvertConfig {
     pub hashcheck: bool,
     pub familynames: bool,
     pub outputgroup: bool,
+    /// Peak-memory budget (bytes) for the cross-layout transpose. When the
+    /// packed matrix fits, the fast single-pass in-memory transpose is used;
+    /// otherwise the transpose is banded to stay within this budget (at the
+    /// cost of re-streaming the source once per band). See `stream_cross_layout`.
+    pub max_mem: u64,
 }
 
 pub fn run_convert(cfg: &ConvertConfig) -> Result<()> {
@@ -243,11 +281,15 @@ pub fn run_convert(cfg: &ConvertConfig) -> Result<()> {
         stream_cross_layout(
             reader.as_mut(),
             writer.as_mut(),
+            in_fmt,
+            &cfg.geno_in,
             &keep_snps,
             &keep_inds,
             ind_rows.len(),
+            snp_rows.len(),
             kept_ind_count,
             kept_snp_count,
+            cfg.max_mem,
         )?;
     }
     writer.finish()?;
@@ -767,11 +809,75 @@ fn stream_sample_major(
 
 /// Cross-layout: SnpMajor ↔ SampleMajor via full-matrix transpose.
 ///
-/// Materializes the (filtered) source matrix in memory, transposes, writes.
-/// For AADR scale (1.23M SNPs × 17.6k samples, ~1.2 GB per side) this uses
-/// ~2.5 GB RAM total. Acceptable on modern systems; if someone complains,
-/// we can add streaming tiled transpose later.
+/// Cross-layout conversion (TGENO/sample-major <-> a SNP-major format) requires
+/// transposing the 2-bit-packed matrix. This dispatcher picks the strategy from
+/// the `max_mem` budget: if the whole matrix (source + transposed destination)
+/// fits, it takes the fast single-pass in-memory path (`_in_memory`, unchanged);
+/// otherwise it uses the memory-bounded banded path (`_banded`), which trades a
+/// bounded peak for re-streaming the source once per band.
+#[allow(clippy::too_many_arguments)]
 fn stream_cross_layout(
+    reader: &mut dyn GenoReader,
+    writer: &mut dyn GenoWriter,
+    in_fmt: Format,
+    geno_in: &Path,
+    keep_snps: &[bool],
+    keep_inds: &[bool],
+    total_inds: usize,
+    total_snps: usize,
+    kept_inds: usize,
+    kept_snps_count: usize,
+    max_mem: u64,
+) -> Result<()> {
+    let (src_rows, src_cols) = match reader.layout() {
+        Layout::SnpMajor => (kept_snps_count, kept_inds),
+        Layout::SampleMajor => (kept_inds, kept_snps_count),
+    };
+    // Destination rows have `src_rows` cells each (the transpose swaps axes).
+    let dst_row_bytes = (src_rows * 2 + 7) / 8;
+
+    // Largest band width `B` (source columns / destination rows per pass) whose
+    // two working strips fit the budget:
+    //   src_strip = src_rows * ceil(B*2/8)   (<= src_rows*B/4 + src_rows)
+    //   dst_strip = B * dst_row_bytes
+    // Solve B * (src_rows/4 + dst_row_bytes) <= max_mem - src_rows.
+    let per_col = (src_rows as u64) / 4 + dst_row_bytes as u64 + 1;
+    let budget = max_mem.saturating_sub(src_rows as u64);
+    let band = ((budget / per_col.max(1)).max(1) as usize).min(src_cols.max(1));
+    let n_bands = src_cols.div_ceil(band.max(1));
+
+    if n_bands <= 1 {
+        return stream_cross_layout_in_memory(
+            reader,
+            writer,
+            keep_snps,
+            keep_inds,
+            total_inds,
+            kept_inds,
+            kept_snps_count,
+        );
+    }
+    stream_cross_layout_banded(
+        writer,
+        in_fmt,
+        geno_in,
+        reader.layout(),
+        keep_snps,
+        keep_inds,
+        total_inds,
+        total_snps,
+        kept_inds,
+        kept_snps_count,
+        band,
+        n_bands,
+    )
+}
+
+/// Materializes the (filtered) source matrix in memory, transposes, writes.
+/// Fast single-pass path used when the matrix fits the `--max-mem` budget.
+/// For AADR scale (1.23M SNPs × 17.6k samples, ~1.2 GB per side) this uses
+/// ~2.5 GB RAM total; larger jobs take `stream_cross_layout_banded` instead.
+fn stream_cross_layout_in_memory(
     reader: &mut dyn GenoReader,
     writer: &mut dyn GenoWriter,
     keep_snps: &[bool],
@@ -909,9 +1015,144 @@ fn stream_cross_layout(
     Ok(())
 }
 
+/// Memory-bounded cross-layout transpose. Emits the destination in bands of
+/// `band` rows (= `band` source columns). For each band it re-opens the source,
+/// streams every record while packing only that band's columns into a small
+/// strip, transposes the strip with the shared `transpose_packed` kernel, and
+/// writes the band's records in order. Peak RAM ≈ `src_strip + dst_strip`,
+/// which the caller sized to the `--max-mem` budget.
+///
+/// Cost: the source is re-streamed `n_bands` times (read + unpack/project
+/// amplification). The transpose math and codec are reused verbatim from the
+/// single-pass path, so this stays out of the genotype-corruption blast radius;
+/// correctness is pinned by differential tests against the in-memory path and
+/// the plink2/PAM oracles.
+#[allow(clippy::too_many_arguments)]
+fn stream_cross_layout_banded(
+    writer: &mut dyn GenoWriter,
+    in_fmt: Format,
+    geno_in: &Path,
+    layout: Layout,
+    keep_snps: &[bool],
+    keep_inds: &[bool],
+    total_inds: usize,
+    total_snps: usize,
+    kept_inds: usize,
+    kept_snps_count: usize,
+    band: usize,
+    n_bands: usize,
+) -> Result<()> {
+    let t_all = Instant::now();
+    let (src_rows, src_cols) = match layout {
+        Layout::SnpMajor => (kept_snps_count, kept_inds),
+        Layout::SampleMajor => (kept_inds, kept_snps_count),
+    };
+    let dst_row_bytes = (src_rows * 2 + 7) / 8;
+
+    log::info!(
+        "cross-layout: banded transpose of {}x{} matrix in {} band(s) of <= {} col(s) \
+         (re-streams source {} time(s), est. peak {} MB)",
+        src_rows,
+        src_cols,
+        n_bands,
+        band,
+        n_bands,
+        (src_rows * ((band * 2 + 7) / 8) + band * dst_row_bytes) / 1_048_576,
+    );
+
+    let mut col_start = 0usize;
+    let mut dst_written = 0usize;
+    while col_start < src_cols {
+        let this_band = band.min(src_cols - col_start);
+        let this_row_bytes = (this_band * 2 + 7) / 8;
+        // src_strip: src_rows records, each holding this band's `this_band` cells.
+        let mut src_strip = vec![0u8; src_rows * this_row_bytes];
+
+        // One fresh streaming pass over the whole source for this band.
+        let mut reader = open_reader(in_fmt, geno_in, total_inds, total_snps)?;
+        let mut in_buf = vec![0u8; reader.record_bytes()];
+        let mut out_row = 0usize;
+
+        match layout {
+            Layout::SnpMajor => {
+                // Records are SNPs; keep per keep_snps, project samples per keep_inds,
+                // then take the band's slice of the kept-sample axis.
+                let mut unpacked = vec![0u8; total_inds];
+                let mut projected = vec![0u8; kept_inds];
+                let mut snp_idx = 0usize;
+                while reader.read_record(&mut in_buf)? {
+                    let keep = keep_snps[snp_idx];
+                    snp_idx += 1;
+                    if !keep {
+                        continue;
+                    }
+                    codec::unpack(&in_buf, total_inds, &mut unpacked);
+                    let mut k = 0;
+                    for (i, &ki) in keep_inds.iter().enumerate() {
+                        if ki {
+                            projected[k] = unpacked[i];
+                            k += 1;
+                        }
+                    }
+                    let row_slice =
+                        &mut src_strip[out_row * this_row_bytes..(out_row + 1) * this_row_bytes];
+                    codec::pack(&projected[col_start..col_start + this_band], row_slice);
+                    out_row += 1;
+                }
+            }
+            Layout::SampleMajor => {
+                // Records are samples; keep per keep_inds, project SNPs per keep_snps,
+                // then take the band's slice of the kept-SNP axis.
+                let mut unpacked = vec![0u8; total_snps];
+                let mut projected = vec![0u8; kept_snps_count];
+                let mut ind_idx = 0usize;
+                while reader.read_record(&mut in_buf)? {
+                    let keep = keep_inds[ind_idx];
+                    ind_idx += 1;
+                    if !keep {
+                        continue;
+                    }
+                    codec::unpack(&in_buf, total_snps, &mut unpacked);
+                    let mut k = 0;
+                    for (j, &ks) in keep_snps.iter().enumerate() {
+                        if ks {
+                            projected[k] = unpacked[j];
+                            k += 1;
+                        }
+                    }
+                    let row_slice =
+                        &mut src_strip[out_row * this_row_bytes..(out_row + 1) * this_row_bytes];
+                    codec::pack(&projected[col_start..col_start + this_band], row_slice);
+                    out_row += 1;
+                }
+            }
+        }
+        debug_assert_eq!(
+            out_row, src_rows,
+            "banded pass produced {out_row} source rows, expected {src_rows}"
+        );
+
+        // Transpose this band: [src_rows x this_band] -> [this_band x src_rows],
+        // then emit the band's destination records in order.
+        let mut dst_strip = vec![0u8; this_band * dst_row_bytes];
+        crate::transpose::transpose_packed(&src_strip, src_rows, this_band, &mut dst_strip)?;
+        for r in 0..this_band {
+            writer.write_record(&dst_strip[r * dst_row_bytes..(r + 1) * dst_row_bytes])?;
+            dst_written += 1;
+        }
+        col_start += this_band;
+    }
+    debug_assert_eq!(dst_written, src_cols);
+    log::info!("cross-layout (banded) total: {:.2?}", t_all.elapsed());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{compute_missing_counts, run_convert, validate_missingness_threshold, ConvertConfig};
+    use super::{
+        compute_missing_counts, default_max_mem, detect_total_memory, parse_meminfo_total,
+        run_convert, validate_missingness_threshold, ConvertConfig,
+    };
     use crate::format::Format;
     use crate::geno::{codec, GenoReader, Layout};
     use anyhow::Result;
@@ -941,6 +1182,28 @@ mod tests {
             dst.copy_from_slice(&self.records[self.idx]);
             self.idx += 1;
             Ok(true)
+        }
+    }
+
+    #[test]
+    fn meminfo_total_parses_kb_to_bytes() {
+        let sample = "MemTotal:       16106280 kB\nMemFree:  1234 kB\nMemAvailable: 8000000 kB\n";
+        assert_eq!(parse_meminfo_total(sample), Some(16106280u64 * 1024));
+        // Missing / malformed -> None (callers fall back).
+        assert_eq!(parse_meminfo_total("MemFree: 100 kB\n"), None);
+        assert_eq!(parse_meminfo_total("MemTotal: notanumber kB\n"), None);
+    }
+
+    #[test]
+    fn default_max_mem_is_half_ram_and_floored() {
+        // On the test host RAM is detectable; the default must be positive,
+        // at least the 512 MiB floor, and no more than total RAM.
+        let budget = default_max_mem();
+        assert!(budget >= 512 * 1024 * 1024, "budget below floor: {budget}");
+        if let Some(total) = detect_total_memory() {
+            assert!(budget <= total, "budget {budget} exceeds total RAM {total}");
+            // Half of RAM (unless the floor kicked in on a tiny machine).
+            assert!(budget == (total / 2).max(512 * 1024 * 1024));
         }
     }
 
@@ -1048,6 +1311,7 @@ mod tests {
             hashcheck: false,
             familynames: true,
             outputgroup: false,
+            max_mem: default_max_mem(),
         };
         run_convert(&cfg).unwrap();
 

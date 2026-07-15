@@ -161,6 +161,7 @@ pub fn run_filter(args: FilterArgs) -> Result<()> {
         hashcheck: !args.no_hashcheck,
         familynames: !args.no_familynames,
         outputgroup: args.outputgroup,
+        max_mem: pipeline::default_max_mem(),
     };
 
     pipeline::run_convert(&cfg)

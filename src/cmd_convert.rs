@@ -121,6 +121,45 @@ pub struct ConvertArgs {
     /// Emit population groups in .ind/.fam
     #[arg(long)]
     pub outputgroup: bool,
+
+    /// Peak-memory budget for the cross-layout (TGENO <-> SNP-major) transpose,
+    /// e.g. 512M, 2G, 4GiB. Matrices that fit take the fast single-pass path;
+    /// larger ones are transposed in bands to stay within budget (fewer passes
+    /// when the budget is larger). Default: half of installed RAM.
+    #[arg(long = "max-mem", value_parser = parse_size)]
+    pub max_mem: Option<u64>,
+}
+
+/// Parse a human-readable byte size like `512`, `512M`, `2G`, `4GiB`.
+///
+/// Units are powers of 1024 (`K`/`KB`/`KiB` = 1024, `M` = 1024², `G` = 1024³,
+/// `T` = 1024⁴); a bare number is bytes. Used for `--max-mem`.
+fn parse_size(s: &str) -> std::result::Result<u64, String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Err("empty size".to_string());
+    }
+    // Split the leading number (digits + optional decimal point) from the unit.
+    let split = t
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(t.len());
+    let (num_str, unit_str) = t.split_at(split);
+    let num: f64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid size '{s}': '{num_str}' is not a number"))?;
+    let mult: f64 = match unit_str.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "m" | "mb" | "mib" => 1024.0 * 1024.0,
+        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "t" | "tb" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        other => return Err(format!("invalid size '{s}': unknown unit '{other}'")),
+    };
+    let bytes = num * mult;
+    if bytes.is_nan() || bytes < 1.0 {
+        return Err(format!("invalid size '{s}': must be at least 1 byte"));
+    }
+    Ok(bytes as u64)
 }
 
 pub fn run(args: ConvertArgs) -> Result<()> {
@@ -161,6 +200,18 @@ pub fn run(args: ConvertArgs) -> Result<()> {
         hashcheck: !args.no_hashcheck,
         familynames: !args.no_familynames,
         outputgroup: args.outputgroup,
+        // Default the transpose budget to half of installed RAM; the flag wins.
+        max_mem: match args.max_mem {
+            Some(m) => m,
+            None => {
+                let m = pipeline::default_max_mem();
+                log::info!(
+                    "--max-mem not set; using half of installed RAM = {} MiB",
+                    m / (1024 * 1024)
+                );
+                m
+            }
+        },
     };
 
     pipeline::run_convert(&cfg)

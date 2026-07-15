@@ -184,6 +184,7 @@ pub fn run_merge(args: MergeArgs) -> Result<()> {
                 hashcheck: true,
                 familynames: !args.no_familynames,
                 outputgroup: false,
+                max_mem: pipeline::default_max_mem(),
             };
             log::info!(
                 "auto-converting merge input {:?} ({in_fmt:?}) to PAM",
