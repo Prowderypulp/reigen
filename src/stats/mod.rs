@@ -17,21 +17,26 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Args, Debug)]
+#[command(after_help = "EXAMPLES:\n  \
+    # Per-SNP and per-sample QC stats -> qc.snp_stats.tsv, qc.sample_stats.tsv\n  \
+    reigen stats -i data -o qc\n\n  \
+    # Add a pairwise IBS/distance matrix (O(n^2) memory)\n  \
+    reigen stats -i data -o qc --ibs")]
 pub struct StatsArgs {
     /// Input prefix (derives .geno/.snp/.ind or .bed/.bim/.fam)
     #[arg(short = 'i', long)]
     pub in_prefix: Option<String>,
 
-    /// Input genotype file
-    #[arg(long)]
+    /// Input genotype file (.geno/.bed/.pgen)
+    #[arg(long, alias = "in-geno")]
     pub geno: Option<PathBuf>,
 
-    /// Input SNP file
-    #[arg(long)]
+    /// Input SNP file (.snp/.bim/.pvar)
+    #[arg(long, alias = "in-snp")]
     pub snp: Option<PathBuf>,
 
-    /// Input individual/family file
-    #[arg(long)]
+    /// Input individual/family file (.ind/.fam/.psam)
+    #[arg(long, alias = "in-ind")]
     pub ind: Option<PathBuf>,
 
     /// Output prefix for stats files

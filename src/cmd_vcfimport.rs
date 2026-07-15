@@ -28,7 +28,7 @@ pub struct VcfImportArgs {
     pub ref_snp: Option<PathBuf>,
 
     /// Output format
-    #[arg(long)]
+    #[arg(long, value_enum, ignore_case = true)]
     pub out_format: Format,
 
     /// Output prefix (derives .geno/.snp/.ind or .bed/.bim/.fam)
@@ -58,6 +58,12 @@ pub struct VcfImportArgs {
 pub fn run_vcfimport(args: VcfImportArgs) -> Result<()> {
     let t0 = Instant::now();
 
+    if !args.input.exists() {
+        bail!(
+            "VCF input file not found: '{}'\n  hint: check the --in path",
+            args.input.display()
+        );
+    }
     if args.numchrom > 251 {
         bail!("numchrom {} is too large (max 251)", args.numchrom);
     }

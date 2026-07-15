@@ -30,6 +30,14 @@ use self::plan::{build_plan, MergeInputSpec};
 use self::stream::open_seekable;
 
 #[derive(Args, Debug)]
+#[command(after_help = "EXAMPLES:\n  \
+    # Merge two datasets (union of SNPs) and write PLINK1\n  \
+    reigen merge --in panelA --in panelB --out-format packedped -o merged\n\n  \
+    # Keep only SNPs shared by every input, from a list file\n  \
+    reigen merge --in-list panels.txt --intersection --out-format packedancestrymap -o merged\n\n\
+    Needs >=2 inputs. Each --in is a prefix or a geno:snp:ind triple. Ambiguous \
+    A/T & C/G SNPs are dropped by default (--allow-ambiguous keeps them); dropped \
+    SNPs and renamed duplicate IDs are written to .missnp*/.idmap.tsv reports.")]
 pub struct MergeArgs {
     /// Input dataset, as geno:snp:ind or as a path prefix. Repeat per dataset.
     #[arg(long = "in", value_name = "PREFIX_OR_TRIPLE")]
@@ -41,7 +49,7 @@ pub struct MergeArgs {
     pub in_list: Option<PathBuf>,
 
     /// Output format
-    #[arg(long)]
+    #[arg(long, value_enum, ignore_case = true)]
     pub out_format: Format,
 
     /// Output prefix (derives .geno/.snp/.ind or .bed/.bim/.fam)

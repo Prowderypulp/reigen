@@ -42,22 +42,33 @@ impl SnpStats {
         (self.n_hom_ref as f64 * 2.0 + self.n_het as f64) / total_alleles
     }
 
-    /// Alternate allele frequency (= 1 - ref_freq).
+    /// Alternate allele frequency.
+    ///
+    /// Counted directly from the alternate-allele copies rather than as
+    /// `1 - ref_freq`: subtracting from 1.0 introduces a rounding error (e.g.
+    /// `1.0 - 0.9 == 0.09999999999999998`) that flips exact-boundary `--maf`
+    /// comparisons against plink (B-014). `2*n_hom_alt + n_het` over `2n` is
+    /// exact for the common denominators.
     pub fn alt_freq(&self) -> f64 {
+        let n = self.n_called();
+        if n == 0 {
+            return f64::NAN;
+        }
+        let total_alleles = n as f64 * 2.0;
+        (self.n_hom_alt as f64 * 2.0 + self.n_het as f64) / total_alleles
+    }
+
+    /// Minor allele frequency.
+    ///
+    /// `min(ref_freq, alt_freq)` where both are counted directly from integer
+    /// allele copies (see `alt_freq`), so a SNP at exactly the threshold
+    /// compares bit-identically to plink instead of being spuriously dropped.
+    pub fn maf(&self) -> f64 {
         let rf = self.ref_freq();
         if rf.is_nan() {
             return f64::NAN;
         }
-        1.0 - rf
-    }
-
-    /// Minor allele frequency.
-    pub fn maf(&self) -> f64 {
-        let af = self.alt_freq();
-        if af.is_nan() {
-            return f64::NAN;
-        }
-        af.min(1.0 - af)
+        rf.min(self.alt_freq())
     }
 
     /// Observed heterozygosity.
@@ -114,9 +125,12 @@ fn hwe_exact_midp(n_aa: usize, n_ab: usize, n_bb: usize) -> f64 {
     let n_a = 2 * n_aa + n_ab; // total count of allele A
     let n_b = 2 * n_bb + n_ab; // total count of allele B
 
-    if n_a == 0 || n_b == 0 {
-        return 1.0;
-    }
+    // NB: a monomorphic locus (n_a == 0 || n_b == 0) is *not* special-cased to
+    // 1.0 here. Its distribution is a single point mass at the observed table,
+    // for which the mid-p value is 0.5 * P(obs) = 0.5 — matching plink's
+    // `--hardy midp`. The general path below yields exactly that; an early
+    // `return 1.0` would report the plain exact p instead of the mid-p and
+    // diverge from the oracle on every monomorphic SNP (B-015).
 
     // Maximum possible heterozygotes given allele counts
     let max_het = n_a.min(n_b);
@@ -188,14 +202,26 @@ fn hwe_exact_midp(n_aa: usize, n_ab: usize, n_bb: usize) -> f64 {
 
     let obs_prob = probs[obs_idx];
 
-    // Mid-p: sum of probabilities strictly less extreme + 0.5 * obs_prob
+    // Two-sided mid-p: tables strictly *more* extreme than the observed one (i.e.
+    // lower probability) count at full weight; tables *as* extreme as the
+    // observed (equal probability — the observed table AND any ties) count at
+    // HALF weight. A symmetric HWE distribution routinely has a second table
+    // with probability identical to the observed (e.g. het=k and het=k+2 both at
+    // the mode); counting those ties at full weight — as the old code did, since
+    // it added every `p <= obs_prob` at full weight and only halved the single
+    // observed index — inflates the p-value by 0.5*P(tie) and diverges from
+    // plink's `--hardy midp` (B-015). Compare with a relative tolerance so
+    // genuinely-equal tables are recognised despite float rounding.
+    let lo = obs_prob * (1.0 - 1e-7);
+    let hi = obs_prob * (1.0 + 1e-7);
     let mut p_value = 0.0;
-    for (i, &p) in probs.iter().enumerate() {
-        if i != obs_idx && p <= obs_prob + 1e-15 {
+    for &p in probs.iter() {
+        if p < lo {
             p_value += p;
+        } else if p <= hi {
+            p_value += 0.5 * p;
         }
     }
-    p_value += 0.5 * obs_prob;
 
     // Clamp to [0, 1]
     p_value.clamp(0.0, 1.0)
@@ -269,6 +295,25 @@ mod tests {
     }
 
     #[test]
+    fn maf_exact_boundary_is_representable() {
+        // B-014: MAF must be counted directly, not via `1.0 - ref_freq`, or a
+        // SNP whose true MAF is exactly the threshold gets a value of
+        // 0.09999999999999998 and is spuriously dropped by `--maf 0.1`.
+        // 12 ALT copies out of 120 (48 hom-ref, 0 het? use 54 hom-ref, 12 het,..)
+        // Construct 60 samples: alt copies = 12 => 54 hom-ref, 0 het, 6 hom-alt
+        // gives alt = 12, ref = 108. maf = 0.1 exactly.
+        let s = SnpStats {
+            n_hom_ref: 54, // g=2, ref alleles
+            n_het: 0,
+            n_hom_alt: 6, // g=0, alt alleles => 12 alt copies
+            n_missing: 0,
+        };
+        assert_eq!(s.alt_freq(), 0.1, "alt_freq must be exactly 0.1");
+        assert_eq!(s.maf(), 0.1, "maf must be exactly 0.1, not 0.0999…");
+        assert!(!(s.maf() < 0.1), "maf must not fall below the 0.1 threshold");
+    }
+
+    #[test]
     fn hwe_perfect_equilibrium() {
         // 25 AA, 50 AB, 25 BB → p=0.5, expected HWE
         // Should give p-value close to 1.0
@@ -312,7 +357,25 @@ mod tests {
 
     #[test]
     fn hwe_monomorphic() {
-        // All same genotype, no polymorphism
-        assert_eq!(hwe_exact_midp(100, 0, 0), 1.0);
+        // B-015: a monomorphic locus has a single-point distribution; its two-
+        // sided *mid*-p is 0.5 * P(obs) = 0.5, matching `plink --hardy midp`.
+        // (The old code special-cased this to 1.0 — the plain exact p — which
+        // silently diverged from the oracle on every monomorphic SNP.)
+        assert!((hwe_exact_midp(100, 0, 0) - 0.5).abs() < 1e-9);
+        assert!((hwe_exact_midp(0, 0, 100) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hwe_midp_halves_ties() {
+        // B-015: when a second table is exactly as probable as the observed one
+        // (the HWE distribution is symmetric, so het=k and het=k+2 tie at the
+        // mode), both must be counted at HALF weight. Ground truth from an
+        // independent lgamma implementation, matching `plink --hardy midp`.
+        //   15 AA / 14 AB / 4 BB  -> mid-p = 0.71458 (obs het=14 ties het=16)
+        let p = hwe_exact_midp(15, 14, 4);
+        assert!((p - 0.71458).abs() < 1e-4, "midp with tie, got {p}");
+        //   26 AA / 28 AB / 6 BB  -> mid-p = 0.77976
+        let p2 = hwe_exact_midp(26, 28, 6);
+        assert!((p2 - 0.77976).abs() < 1e-4, "midp with tie, got {p2}");
     }
 }

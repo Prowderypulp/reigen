@@ -19,16 +19,16 @@ pub struct ExportArgs {
     #[arg(short = 'i', long)]
     pub in_prefix: Option<String>,
 
-    /// Input genotype file
-    #[arg(long)]
+    /// Input genotype file (.geno/.bed/.pgen)
+    #[arg(long, alias = "in-geno")]
     pub geno: Option<PathBuf>,
 
-    /// Input SNP file
-    #[arg(long)]
+    /// Input SNP file (.snp/.bim/.pvar)
+    #[arg(long, alias = "in-snp")]
     pub snp: Option<PathBuf>,
 
-    /// Input individual/family file
-    #[arg(long)]
+    /// Input individual/family file (.ind/.fam/.psam)
+    #[arg(long, alias = "in-ind")]
     pub ind: Option<PathBuf>,
 
     /// Output VCF file path

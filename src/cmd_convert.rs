@@ -5,6 +5,13 @@ use clap::Args;
 use std::path::PathBuf;
 
 #[derive(Args, Debug)]
+#[command(after_help = "EXAMPLES:\n  \
+    # PLINK1 -> PACKEDANCESTRYMAP (input format is auto-detected)\n  \
+    reigen convert -i data --out-format packedancestrymap -o out\n\n  \
+    # PACKEDANCESTRYMAP -> PLINK2, restricted to chr1-22 with MAF >= 5%\n  \
+    reigen convert -i data --out-format plink2 --chrom 1-22 --maf 0.05 -o out\n\n  \
+    # Name input files explicitly instead of a prefix\n  \
+    reigen convert --in-geno d.geno --in-snp d.snp --in-ind d.ind --out-format packedped -o out")]
 pub struct ConvertArgs {
     /// Input prefix (derives .geno/.snp/.ind or .bed/.bim/.fam)
     #[arg(short = 'i', long)]
@@ -23,7 +30,7 @@ pub struct ConvertArgs {
     pub ind: Option<PathBuf>,
 
     /// Output format
-    #[arg(long)]
+    #[arg(long, value_enum, ignore_case = true)]
     pub out_format: Format,
 
     /// Output prefix (derives output paths)

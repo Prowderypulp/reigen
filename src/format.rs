@@ -3,14 +3,28 @@ use std::path::Path;
 use std::str::FromStr;
 
 /// Supported input/output formats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Derives `clap::ValueEnum` so `--out-format` lists its choices in `--help`
+/// and reports a helpful error (with the valid values) on a typo. The explicit
+/// `value(name = …, alias = …)` keeps every historical spelling working, and
+/// the `--out-format` args set `ignore_case = true`, so `PACKEDANCESTRYMAP`,
+/// `packedancestrymap`, and `pam` all resolve to the same variant. The manual
+/// `FromStr` below is retained for internal `.parse::<Format>()` callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
+    #[value(name = "eigenstrat")]
     Eigenstrat,
+    #[value(name = "packedancestrymap", alias = "pam")]
     PackedAncestrymap,
+    #[value(name = "ancestrymap")]
     Ancestrymap,
+    #[value(name = "ped")]
     Ped,
+    #[value(name = "packedped", alias = "bed", alias = "plink1")]
     PackedPed,
+    #[value(name = "tgeno", alias = "transpose_geno")]
     Tgeno,
+    #[value(name = "plink2", alias = "pgen", alias = "plink2_binary")]
     Plink2,
 }
 
@@ -54,8 +68,18 @@ pub fn infer_input_format(geno: &Path) -> Result<Format> {
         "ancestrymapgeno" => Ok(Format::Ancestrymap),
         "packedancestrymapgeno" => Ok(Format::PackedAncestrymap),
         "geno" => sniff_geno_header(geno),
+        "" => Err(anyhow!(
+            "cannot infer input format: '{}' has no file extension\n  \
+             expected a genotype file such as .geno, .bed, or .pgen \
+             (did you pass a prefix to --in-geno instead of -i/--in-prefix?)",
+            geno.display()
+        )),
         other => Err(anyhow!(
-            "cannot infer input format from extension {other:?} on {}",
+            "cannot infer input format from '.{other}' extension on '{}'\n  \
+             recognized genotype extensions: .geno, .bed (PLINK1), .pgen (PLINK2), \
+             .tgeno, .ped\n  \
+             hint: pass the genotype file (not the .snp/.bim/.pvar), or use \
+             -i/--in-prefix <prefix>",
             geno.display()
         )),
     }

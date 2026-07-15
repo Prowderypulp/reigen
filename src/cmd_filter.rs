@@ -23,7 +23,7 @@ pub struct FilterArgs {
     pub ind: Option<PathBuf>,
 
     /// Output format
-    #[arg(long)]
+    #[arg(long, value_enum, ignore_case = true)]
     pub out_format: Option<Format>,
 
     /// Output prefix (derives output paths)

@@ -164,10 +164,20 @@ pub fn run_convert(cfg: &ConvertConfig) -> Result<()> {
         kept_ind_count
     );
     if kept_snp_count == 0 {
-        bail!("all SNPs filtered out");
+        bail!(
+            "all {} SNPs were removed by the filters — nothing to write\n  \
+             hint: relax the SNP filters (--maf/--max-maf/--hwe/--max-miss-snp/--chrom/\
+             --from-bp/--to-bp/--snps/--badsnp) or check they match this dataset",
+            snp_rows.len()
+        );
     }
     if kept_ind_count == 0 {
-        bail!("all samples filtered out");
+        bail!(
+            "all {} samples were removed by the filters — nothing to write\n  \
+             hint: relax the sample filters (--mind/--keep/--remove/--poplist) or check \
+             the IDs in your keep/remove list match the .ind/.fam",
+            ind_rows.len()
+        );
     }
 
     // --- 3. Open reader + writer (boxed trait objects).
@@ -1058,72 +1068,107 @@ pub fn resolve_paths(
 ) -> Result<(PathBuf, PathBuf, PathBuf)> {
     if let Some(p) = prefix {
         let p_path = PathBuf::from(p);
-        let g = geno.unwrap_or_else(|| {
-            if is_output {
+        let g = match geno {
+            Some(g) => g,
+            None if is_output => {
                 let (gext, _, _) = out_format
                     .expect("out_format required for output")
                     .default_output_extensions();
-                return p_path.with_extension(gext);
+                p_path.with_extension(gext)
             }
-            // Check for .pgen first, then .bed, then .geno
-            let pgen = p_path.with_extension("pgen");
-            if pgen.exists() {
-                pgen
-            } else {
-                let bed = p_path.with_extension("bed");
-                if bed.exists() {
-                    bed
-                } else {
-                    p_path.with_extension("geno")
-                }
+            None => {
+                // Input prefix: pick whichever genotype file actually exists,
+                // preferring PLINK2 → PLINK1 → EIGENSTRAT/PAM. If none exists,
+                // say exactly what was looked for instead of failing later with
+                // a bare "No such file or directory".
+                ["pgen", "bed", "geno"]
+                    .iter()
+                    .map(|ext| p_path.with_extension(ext))
+                    .find(|c| c.exists())
+                    .ok_or_else(|| {
+                        let b = p_path.display();
+                        anyhow::anyhow!(
+                            "no genotype file found for input prefix '{b}'\n  \
+                             looked for: {b}.pgen, {b}.bed, {b}.geno\n  \
+                             hint: check the prefix, or pass the file directly with --in-geno"
+                        )
+                    })?
             }
-        });
+        };
 
-        let s = snp.unwrap_or_else(|| {
-            if is_output {
-                let (_, sext, _) = out_format
-                    .expect("out_format required for output")
-                    .default_output_extensions();
-                return p_path.with_extension(sext);
-            }
+        let derive = |ext_pgen: &str, ext_bed: &str, ext_default: &str| {
             let gext = g.extension().and_then(|e| e.to_str());
-            if gext == Some("pgen") {
-                p_path.with_extension("pvar")
-            } else if gext == Some("bed") {
-                p_path.with_extension("bim")
-            } else {
-                p_path.with_extension("snp")
+            match gext {
+                Some("pgen") => p_path.with_extension(ext_pgen),
+                Some("bed") => p_path.with_extension(ext_bed),
+                _ => p_path.with_extension(ext_default),
             }
-        });
+        };
 
-        let i = ind.unwrap_or_else(|| {
-            if is_output {
-                let (_, _, iext) = out_format
-                    .expect("out_format required for output")
-                    .default_output_extensions();
-                return p_path.with_extension(iext);
+        let s = match snp {
+            Some(s) => s,
+            None if is_output => {
+                let (_, sext, _) = out_format.unwrap().default_output_extensions();
+                p_path.with_extension(sext)
             }
-            let gext = g.extension().and_then(|e| e.to_str());
-            if gext == Some("pgen") {
-                p_path.with_extension("psam")
-            } else if gext == Some("bed") {
-                p_path.with_extension("fam")
-            } else {
-                p_path.with_extension("ind")
+            None => derive("pvar", "bim", "snp"),
+        };
+        let i = match ind {
+            Some(i) => i,
+            None if is_output => {
+                let (_, _, iext) = out_format.unwrap().default_output_extensions();
+                p_path.with_extension(iext)
             }
-        });
+            None => derive("psam", "fam", "ind"),
+        };
 
+        if !is_output {
+            check_input_exists(&g, &s, &i)?;
+        }
+        Ok((g, s, i))
+    } else if is_output {
+        // No prefix on the output side: the user must name every output file.
+        let g = geno.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no output location given: pass -o/--out-prefix <prefix>, or name every \
+                 output file with --out-geno/--out-snp/--out-ind"
+            )
+        })?;
+        let s = snp.ok_or_else(|| anyhow::anyhow!("missing --out-snp (or use -o/--out-prefix)"))?;
+        let i = ind.ok_or_else(|| anyhow::anyhow!("missing --out-ind (or use -o/--out-prefix)"))?;
         Ok((g, s, i))
     } else {
         let g = geno.ok_or_else(|| {
-            anyhow::anyhow!("missing genotype input (provide --in-geno or --in-prefix)")
+            anyhow::anyhow!(
+                "no input given: pass -i/--in-prefix <prefix>, or name the files with \
+                 --in-geno/--in-snp/--in-ind"
+            )
         })?;
-        let s = snp.ok_or_else(|| {
-            anyhow::anyhow!("missing SNP input (provide --in-snp or --in-prefix)")
-        })?;
-        let i = ind.ok_or_else(|| {
-            anyhow::anyhow!("missing individual input (provide --in-ind or --in-prefix)")
-        })?;
+        let s = snp
+            .ok_or_else(|| anyhow::anyhow!("missing --in-snp (or use -i/--in-prefix)"))?;
+        let i = ind
+            .ok_or_else(|| anyhow::anyhow!("missing --in-ind (or use -i/--in-prefix)"))?;
+        check_input_exists(&g, &s, &i)?;
         Ok((g, s, i))
     }
+}
+
+/// Verify each resolved input file exists, naming the missing one specifically
+/// so the user gets a clear "this file is missing" rather than a downstream
+/// "No such file or directory (os error 2)".
+fn check_input_exists(geno: &Path, snp: &Path, ind: &Path) -> Result<()> {
+    for (path, flag, what) in [
+        (geno, "--in-geno", "genotype"),
+        (snp, "--in-snp", "SNP"),
+        (ind, "--in-ind", "individual/sample"),
+    ] {
+        if !path.exists() {
+            bail!(
+                "{what} input file not found: '{}'\n  \
+                 hint: check the path (or the {flag} argument / the -i prefix)",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }

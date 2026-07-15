@@ -36,6 +36,14 @@ pub enum SexArg {
 }
 
 #[derive(Args, Debug)]
+#[command(after_help = "EXAMPLES:\n  \
+    # Auto-detect vendor (23andMe/Ancestry) and write PLINK1; sample id = file stem\n  \
+    reigen import --in kit.txt --out-format packedped -o kit\n\n  \
+    # Force the vendor and set the sample id / population\n  \
+    reigen import --in raw.csv --vendor ftdna --sample-id S1 --sample-pop Pop1 \\\n    \
+      --out-format eigenstrat -o s1\n\n\
+    Notes: gzip/zip kits are read directly; FTDNA and MyHeritage share a header, \
+    so pass --vendor for those. Autosomes only unless --include-non-autosomal.")]
 pub struct ImportArgs {
     /// Input DTC kit file
     #[arg(long = "in", value_name = "KIT")]
@@ -45,9 +53,9 @@ pub struct ImportArgs {
     #[arg(long, alias = "snplist")]
     pub snps: Option<PathBuf>,
 
-    /// Sample ID written to .ind / .fam.
+    /// Sample ID written to .ind/.fam (default: the input file's name stem).
     #[arg(long)]
-    pub sample_id: String,
+    pub sample_id: Option<String>,
 
     /// Population label (default: same as --sample-id).
     #[arg(long)]
@@ -58,7 +66,7 @@ pub struct ImportArgs {
     pub sample_sex: SexArg,
 
     /// Output format.
-    #[arg(long)]
+    #[arg(long, value_enum, ignore_case = true)]
     pub out_format: Format,
 
     /// Output prefix (derives .geno/.snp/.ind or .bed/.bim/.fam).
@@ -113,6 +121,32 @@ struct ImportStats {
 pub fn run_import(args: ImportArgs) -> Result<()> {
     let out_format = args.out_format;
 
+    if !args.input.exists() {
+        anyhow::bail!(
+            "kit input file not found: '{}'\n  hint: check the --in path",
+            args.input.display()
+        );
+    }
+
+    // Default the sample ID to the input file's name stem (e.g.
+    // `AncestryDNA - Jane.txt` → `AncestryDNA - Jane`), so a plain
+    // `reigen import --in kit.txt --out-format ... -o out` just works.
+    let sample_id = match args.sample_id {
+        Some(id) => id,
+        None => args
+            .input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not derive a sample id from {:?}; pass --sample-id",
+                    args.input
+                )
+            })?,
+    };
+
     let (geno_in, snp_in, ind_in) = crate::pipeline::resolve_paths(
         args.out_prefix.clone(),
         args.out_geno,
@@ -125,8 +159,8 @@ pub fn run_import(args: ImportArgs) -> Result<()> {
     let cfg = ImportConfig {
         input: args.input,
         snps: args.snps,
-        sample_id: args.sample_id.clone(),
-        sample_pop: args.sample_pop.unwrap_or_else(|| args.sample_id.clone()),
+        sample_id: sample_id.clone(),
+        sample_pop: args.sample_pop.unwrap_or(sample_id),
         sample_sex: match args.sample_sex {
             SexArg::M => Sex::Male,
             SexArg::F => Sex::Female,
@@ -354,6 +388,15 @@ fn collect_lines<R: BufRead>(reader: R, path: &Path) -> Result<Vec<String>> {
 
 fn parse_kit_chrom(s: &str, numchrom: u32) -> Option<u8> {
     if let Ok(c) = s.parse::<u8>() {
+        // Chromosome 0 is the DTC/PLINK code for unplaced / unmapped markers
+        // (e.g. FTDNA control probes reported at `0:0`). It is not a real
+        // chromosome: importing it yields SNP rows at the invalid coordinate
+        // (0, 0) — all colliding at one position — which contradicts the
+        // autosomes-only default and is dropped by plink/`snps`. Reject it so
+        // it is counted as a bad chromosome and excluded (B-017).
+        if c == 0 {
+            return None;
+        }
         return Some(c);
     }
     match s.trim().to_ascii_uppercase().as_str() {
@@ -376,6 +419,17 @@ mod tests {
     #[test]
     fn parses_xy_chromosome() {
         assert_eq!(parse_kit_chrom("XY", 22), Some(26));
+    }
+
+    #[test]
+    fn rejects_unplaced_chromosome_zero() {
+        // B-017: chrom 0 is the DTC/PLINK code for unplaced markers (FTDNA
+        // control probes at 0:0). It must be rejected, not imported as a real
+        // "chrom 0" SNP at the invalid coordinate (0, 0).
+        assert_eq!(parse_kit_chrom("0", 22), None);
+        // Real chromosomes still parse.
+        assert_eq!(parse_kit_chrom("1", 22), Some(1));
+        assert_eq!(parse_kit_chrom("22", 22), Some(22));
     }
 
     #[test]

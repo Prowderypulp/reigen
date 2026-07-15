@@ -80,6 +80,13 @@ pub fn build_plan(
     strict_ids: bool,
 ) -> Result<MergePlan> {
     // --- 1. Load metadata for every dataset and build per-dataset index. ---
+    // Positions that occur more than once *within* a single dataset. The merge
+    // keys SNPs by (chrom, pos) only, so a duplicated position is ambiguous:
+    // `index` would resolve genotypes to the last occurrence while the union
+    // keeps the first occurrence's alleles/id, silently pairing one variant's
+    // alleles with another's (possibly flipped) genotypes. Such positions are
+    // dropped from the merge with a `.missnp` record (B-016).
+    let mut dup_positions: HashMap<SnpKey, String> = HashMap::new();
     let mut datasets = Vec::with_capacity(inputs.len());
     for input in inputs {
         let geno = input.geno;
@@ -98,13 +105,15 @@ pub fn build_plan(
         };
         let mut index = HashMap::with_capacity(snps.len());
         for (i, s) in snps.iter().enumerate() {
-            index.insert(
-                SnpKey {
-                    chrom: s.chrom,
-                    pos: s.physical_pos,
-                },
-                i,
-            );
+            let key = SnpKey {
+                chrom: s.chrom,
+                pos: s.physical_pos,
+            };
+            if index.insert(key, i).is_some() {
+                dup_positions
+                    .entry(key)
+                    .or_insert_with(|| input.label.clone());
+            }
         }
         datasets.push(DatasetMetadata {
             label: input.label,
@@ -157,11 +166,30 @@ pub fn build_plan(
     let mut dropped_ambiguous = 0usize;
     let mut dropped_unresolvable = 0usize;
     let mut dropped_missing_for_intersection = 0usize;
+    let mut dropped_duplicate_position = 0usize;
     // SNPs that only reconciled after a strand complement (PLINK's --flip step).
     let mut strand_flipped = 0usize;
 
     for key in key_order {
         let ri = &ref_info[seen[&key]];
+
+        // Drop positions duplicated within any input dataset (see B-016 above):
+        // they cannot be merged unambiguously by (chrom, pos) alone.
+        if let Some(label) = dup_positions.get(&key) {
+            dropped_snps.push(MissnpRecord {
+                rsid: ri.rep_id.clone(),
+                chrom: key.chrom,
+                pos: key.pos,
+                ref_a1: ri.a1,
+                ref_a2: ri.a2,
+                src_a1: None,
+                src_a2: None,
+                dataset_label: label.clone(),
+                reason: "duplicate_position",
+            });
+            dropped_duplicate_position += 1;
+            continue;
+        }
         let mut decisions: Vec<Option<(usize, FlipDecision)>> = Vec::with_capacity(datasets.len());
         let mut unresolvable = false;
         let mut ambiguous = false;
@@ -296,11 +324,12 @@ pub fn build_plan(
     }
 
     log::info!(
-        "merge plan: {} SNPs retained ({} strand-flipped, {} ambiguous, {} multiallelic/unresolvable, {} missing for {})",
+        "merge plan: {} SNPs retained ({} strand-flipped, {} ambiguous, {} multiallelic/unresolvable, {} duplicate-position, {} missing for {})",
         snp_plans.len(),
         strand_flipped,
         dropped_ambiguous,
         dropped_unresolvable,
+        dropped_duplicate_position,
         dropped_missing_for_intersection,
         if intersection {
             "intersection"
@@ -396,7 +425,8 @@ fn sanitize_label(label: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::unique_renamed_id;
+    use super::{build_plan, unique_renamed_id, MergeInputSpec};
+    use crate::merge::key::ReconcileOpts;
     use std::collections::HashMap;
 
     #[test]
@@ -406,5 +436,58 @@ mod tests {
         seen.insert("id.ds-2.1".to_string(), 1usize);
         let id = unique_renamed_id("id", "ds-2", &seen);
         assert_eq!(id, "id.ds-2.2");
+    }
+
+    /// Write a minimal PLINK fileset (`.bed`/`.bim`/`.fam`). Only the `.bim`/
+    /// `.fam` are parsed at plan time, so the `.bed` just needs the magic.
+    fn write_plink(dir: &std::path::Path, name: &str, bim: &str, nfam: usize) -> MergeInputSpec {
+        let bed = dir.join(format!("{name}.bed"));
+        let bimp = dir.join(format!("{name}.bim"));
+        let famp = dir.join(format!("{name}.fam"));
+        std::fs::write(&bed, [0x6c, 0x1b, 0x01]).unwrap();
+        std::fs::write(&bimp, bim).unwrap();
+        let fam: String = (0..nfam)
+            .map(|i| format!("{name} {name}_s{i} 0 0 0 -9\n"))
+            .collect();
+        std::fs::write(&famp, fam).unwrap();
+        MergeInputSpec {
+            label: name.to_string(),
+            geno: bed,
+            snp: bimp,
+            ind: famp,
+        }
+    }
+
+    // B-016: two SNPs at the same (chrom, pos) in one input must NOT silently
+    // corrupt the merge (the union kept the first variant's alleles while the
+    // index resolved genotypes to the last). The position is dropped instead,
+    // with a `duplicate_position` missnp record; unambiguous SNPs survive.
+    #[test]
+    fn duplicate_position_within_dataset_is_dropped_not_corrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        // ds A carries two variants at 1:5000 (A/G and C/T) plus a clean 1:1000.
+        let a = write_plink(
+            dir.path(),
+            "A",
+            "1\trsX\t0\t1000\tA\tG\n1\trsDUP_first\t0\t5000\tA\tG\n1\trsDUP_second\t0\t5000\tC\tT\n",
+            2,
+        );
+        let b = write_plink(dir.path(), "B", "1\trsX\t0\t1000\tA\tG\n", 2);
+
+        let opts = ReconcileOpts {
+            flip_strand: true,
+            allow_ambiguous: true,
+            allow_flip_reference: true,
+        };
+        let plan = build_plan(vec![a, b], opts, false, 22, true, false).unwrap();
+
+        // Only the unambiguous 1:1000 survives.
+        assert_eq!(plan.snp_plans.len(), 1);
+        assert_eq!(plan.snp_plans[0].key.pos, 1000);
+        // The duplicated position is reported, not merged.
+        assert!(plan
+            .dropped_snps
+            .iter()
+            .any(|m| m.pos == 5000 && m.reason == "duplicate_position"));
     }
 }

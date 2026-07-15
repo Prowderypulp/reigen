@@ -56,10 +56,19 @@ reigen vcfimport \
 
 ## Important CLI notes
 
-- `convert`/`filter` input file flags are `--in-geno`, `--in-snp`, `--in-ind` (or `-i/--in-prefix`)
-- `stats`/`export` input file flags are `--geno`, `--snp`, `--ind` (or `-i/--in-prefix`)
+- **Simplest usage:** point `-i/--in-prefix <prefix>` at a dataset and reigen derives the
+  `.geno/.snp/.ind`, `.bed/.bim/.fam`, or `.pgen/.pvar/.psam` triple automatically (and
+  auto-detects the input format). `-i` works on every subcommand.
+- **Quiet by default** (standard CLI behaviour): only warnings and errors are printed.
+  Pass `-v` for progress, `-vv` for debug, `-q` to suppress warnings too. `RUST_LOG` overrides.
+- Explicit input files: `--in-geno`, `--in-snp`, `--in-ind` are accepted on **every**
+  subcommand; `stats`/`export` also accept the shorter `--geno`, `--snp`, `--ind` aliases.
+  (On `convert`/`filter`, `--geno` is the per-SNP missingness filter, so use `--in-geno` there.)
+- `--out-format` is case-insensitive and its choices are shown in `--help`:
+  `eigenstrat`, `packedancestrymap` (alias `pam`), `ancestrymap`, `ped`, `packedped`
+  (aliases `bed`, `plink1`), `tgeno`, `plink2` (aliases `pgen`, `plink2_binary`).
+- `import --sample-id` is optional; it defaults to the input kit's filename stem.
 - `filter --out-format` is optional; when omitted it defaults to inferred input format
-- PLINK2 output: `--out-format plink2` (aliases: `pgen`, `plink2_binary`) writes `.pgen`/`.pvar`/`.psam`
 - missingness aliases:
   - per-SNP: `--max-miss-snp` (alias `--geno`)
   - per-sample: `--mind`
